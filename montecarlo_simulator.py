@@ -1,13 +1,14 @@
 import pandas as pd
 from config import LEAD_TIME, HISTO_DAYS
-from demand_generator import DemandGenerator
+from demand_calculator import DemandCalculator
 from order_processor import OrderProcessor
 from inventory_manager import InventoryManager
 from performance_tracker import PerformanceTracker
 
 class MonteCarloSimulator():
-    def __init__(self, agent):
+    def __init__(self, agent, environment):
         self.agent = agent
+        self.environment = environment
 
     def run_simulation(self, N_SIMULATIONS, SIM_DAYS):
 
@@ -17,8 +18,9 @@ class MonteCarloSimulator():
             time_period = 0
             order_processor = OrderProcessor()
             performance_tracker = PerformanceTracker()
-            demand_generator = DemandGenerator(SIM_DAYS)
-            self.agent.daily_demand_distribution = demand_generator
+            demand_calculator = DemandCalculator(SIM_DAYS)
+            demand_calculator.set_environment(self.environment)
+            self.agent.daily_demand_distribution = demand_calculator
 
             inventory_manager = InventoryManager(
                 order_processor=order_processor,
@@ -27,10 +29,10 @@ class MonteCarloSimulator():
 
             # Generate historical demand data -> consistency with algo 1 & 2
             for day in range(HISTO_DAYS):
-                _ = demand_generator.get_daily_demand(day)
+                _ = demand_calculator.get_daily_demand(day)
 
             for day in range(HISTO_DAYS, SIM_DAYS):
-                demand_quantity = demand_generator.get_daily_demand(day)
+                demand_quantity = demand_calculator.get_daily_demand(day)
                 base_inventory = inventory_manager.inventory
 
                 inventory_manager.inventory_update(demand_quantity)

@@ -1,5 +1,4 @@
 from config import WRITE_OFF_RATE, BASE_STOCK, DEFAULT_SERVICE_LEVEL, MC_SIMS
-from demand_generator import DemandGenerator
 
 class InventoryManager:
     def __init__(self, order_processor, agent):

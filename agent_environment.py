@@ -45,6 +45,7 @@ class ForecastAgent(Agent):
         safety_stock = norm.ppf(DEFAULT_SERVICE_LEVEL) * self.demand_std[time_period] * np.sqrt(LEAD_TIME)
         return self.demand_mean[time_period] * LEAD_TIME + safety_stock
 
+
 class MonteCarloAgent(Agent):
     def __init__(self, daily_demand_distribution):
         super().__init__(daily_demand_distribution)
@@ -53,6 +54,7 @@ class MonteCarloAgent(Agent):
     def compute_reorder_point(self, time_period) -> float:
         samples = self.daily_demand_distribution.sample_lead_time_demand(
             time_period=time_period,
+            daily_demand_distribution=self.daily_demand_distribution.daily_demand_distribution,
             mc_sims=MC_SIMS
         )
         return float(np.quantile(samples, self.q))

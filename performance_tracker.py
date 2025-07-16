@@ -8,6 +8,7 @@ class PerformanceTracker:
         self.stock_out_count = 0
         self.total_lost_sales = 0
 
+    # ADD INVENTORY KPI
     def daily_performance(self, demand_quantity, fulfilled_demand, daily_writeoff):
         self.total_demand += demand_quantity
         self.total_fulfilled_demand += fulfilled_demand
