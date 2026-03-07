@@ -5,3 +5,12 @@ scipy
 ciw
 pandas
 httpx
+gymnasium
+stable-baselines3
+torch
+transformers>=4.45.0
+trl>=0.12.0
+peft>=0.14.0
+accelerate>=1.0.0
+datasets
+bitsandbytes
