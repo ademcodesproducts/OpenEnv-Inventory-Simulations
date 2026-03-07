@@ -3,8 +3,7 @@ title: Inventory Reasoning Environment
 emoji: 📦
 colorFrom: blue
 colorTo: green
-sdk: docker
-app_port: 7860
+sdk: gradio
 tags:
   - openenv
   - reinforcement-learning
