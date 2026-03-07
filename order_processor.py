@@ -20,6 +20,3 @@ class OrderProcessor:
         # if order.arrival_day < current_day order excluded after each call of process_order
         self.order_queue = [order for order in self.order_queue if order.arrival_day > time_period]
         return sum(order.quantity for order in arrived_orders)
-
-
-
