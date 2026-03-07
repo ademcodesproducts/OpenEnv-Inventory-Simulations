@@ -1,5 +1,20 @@
+---
+title: Inventory Reasoning Environment
+emoji: 📦
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+tags:
+  - openenv
+  - reinforcement-learning
+  - inventory-optimization
+  - long-horizon
+license: apache-2.0
+---
+
 # Inventory Simulations
- 
+
 Stochastic modeling and Monte Carlo simulations to dimension inventory levels and evaluate reorder strategies under different demand environments.
  
 ## Overview
@@ -64,6 +79,61 @@ All environments apply **seasonality multipliers** (by month and weekday) to the
 - **Lost sales** — total demand not fulfilled due to stockouts
 - **Average inventory level** — mean daily on-hand stock
  
+## OpenEnv HTTP API
+
+This environment exposes a REST interface for LLM agent evaluation. The server runs on port 7860 (HF Spaces default).
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/reset?env_type={0-3}` | POST | Start a new episode, returns `InventoryObservation` |
+| `/step` | POST | Send `{"reorder_point": float, "reasoning": str}`, returns `StepResult` |
+| `/state` | GET | Episode metadata (day, fill_rate, done) |
+
+**Demand env_type**: 0=GammaPoisson, 1=GammaGammaHighVariance, 2=SpikingDemand, 3=SingleGammaLowVariance
+
+**Reward**: `-0.001` per step; terminal reward = final fill rate at day 730.
+
+### Connecting an agent
+
+```python
+import asyncio
+from client.inventory_client import InventoryEnvClient, InventoryAction
+
+async def run_agent():
+    async with InventoryEnvClient("https://YOUR_USERNAME-inventory-env.hf.space") as env:
+        obs = await env.reset(env_type=0)
+        while obs.days_remaining > 0:
+            rop = obs.demand_mean_30d * 3 + obs.demand_std_30d * 1.65
+            result = await env.step(InventoryAction(reorder_point=rop))
+            obs = result.observation
+        print(f"Final fill rate: {result.reward:.3f}")
+
+asyncio.run(run_agent())
+```
+
+### Local server
+
+```bash
+uvicorn server.inventory_env:app --reload --port 7860
+```
+
+### Docker
+
+```bash
+docker build -t inventory-env .
+docker run -p 7860:7860 inventory-env
+```
+
+### Deploy to HF Spaces
+
+```bash
+pip install huggingface_hub
+huggingface-cli login
+huggingface-cli repo create inventory-env --type space --space-sdk docker
+git remote add hf https://huggingface.co/spaces/YOUR_USERNAME/inventory-env
+git push hf main
+```
+
 ## Installation
  
 Requires Python 3.11+. Install dependencies with [Poetry](https://python-poetry.org/):
