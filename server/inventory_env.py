@@ -276,7 +276,7 @@ async def qwen_proxy(req: QwenRequest):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    url = f"https://api-inference.huggingface.co/models/{req.model}/v1/chat/completions"
+    url = f"https://router.huggingface.co/models/{req.model}/v1/chat/completions"
     payload = {"model": req.model, "messages": req.messages, "max_tokens": req.max_tokens, "temperature": req.temperature}
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(url, json=payload, headers=headers)
