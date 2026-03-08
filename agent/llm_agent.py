@@ -18,7 +18,7 @@ import re
 import sys
 from typing import Any
 
-import anthropic
+from huggingface_hub import InferenceClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -28,27 +28,35 @@ SYSTEM_PROMPT = """\
 You are an expert inventory optimization agent operating inside a stochastic supply-chain simulation.
 
 YOUR OBJECTIVE:
-Maximize the fill rate (fraction of demand fulfilled) while minimizing inventory write-offs over a \
-365-day episode. The episode ends at day 730 (after 365 days of decisions following a 365-day warm-up).
+Maximize daily profit and fill rate over a 365-day episode (days 365–730 after a warm-up period).
 
 ENVIRONMENT RULES:
-- Orders arrive exactly 3 days after placement (LEAD_TIME = 3)
-- An order is placed automatically whenever inventory <= your chosen reorder_point
-- Order quantity = reorder_point - current_inventory + mean_demand * LEAD_TIME (handled by the env)
-- Every 7 days, 1% of on-hand inventory is written off (waste/expiry)
-- Fill rate = total units fulfilled / total units demanded (target: >= 95%)
-- Reward is SPARSE: fill rate only stabilises after many days; plan ahead
+- Lead time: 3 days ± 1 day (stochastic — orders may arrive in 2, 3, or 4 days)
+- An order fires automatically whenever inventory <= your reorder_point
+- Order quantity = reorder_point - current_inventory + mean_demand * lead_time (handled by env)
+- Spoilage: 0.143% of on-hand inventory is lost every day (~1% per week)
+- unit_cost = $10, selling_price = $25, fixed_order_cost = $150 per order
+
+DAILY REWARD FORMULA:
+  revenue          = units_sold * 25
+  holding_cost     = inventory * 10 * 0.005
+  stockout_penalty = lost_units * 15  (lost margin per unit)
+  order_cost       = 150 (if ordered) + qty * 10
+  writeoff_cost    = spoilage * 10
+  daily_reward     = (revenue - holding_cost - stockout_penalty - order_cost - writeoff_cost) / baseline
+
+END-OF-EPISODE BONUS (day 730 only):
+  bonus = fill_rate * 0.5 + profit_ratio * 0.5
 
 YOUR ACTION EACH STEP:
-Set `reorder_point` — the inventory level at or below which a replenishment order fires.
-A higher ROP builds safety buffer but risks write-offs. A lower ROP conserves stock but risks stockouts.
+Set `reorder_point` — the inventory threshold that triggers a replenishment order.
 
 REASONING GUIDANCE:
-- Analyse demand trend and variability before deciding
-- Account for pending orders already in the pipeline — they will arrive soon
-- After stockouts, raise ROP aggressively to rebuild buffer
-- If fill rate is healthy and inventory is high, consider lowering ROP to reduce write-offs
-- Think 3+ days ahead; your ROP today only shows its effect after lead time
+- Stockouts are expensive ($15/unit lost margin) — keep enough buffer for lead time uncertainty
+- Excess inventory bleeds holding cost ($0.05/unit/day) and spoilage — don't over-order
+- $150 fixed order cost: batch orders rather than ordering tiny amounts every day
+- Account for pending orders in the pipeline before deciding to order more
+- Think 3–4 days ahead due to stochastic lead times
 
 RESPONSE FORMAT — reply with ONLY a valid JSON object, no markdown fences:
 {"reorder_point": <float>, "reasoning": "<concise explanation>", "confidence": <float 0-1>}
@@ -56,14 +64,14 @@ RESPONSE FORMAT — reply with ONLY a valid JSON object, no markdown fences:
 
 
 class ClaudeInventoryAgent:
-    """Inventory optimization agent backed by Claude claude-sonnet-4-5."""
+    """Inventory optimization agent backed by Qwen2.5-72B via HuggingFace Inference API."""
 
     MEMORY_SIZE = 15
     HISTORY_TURNS = 6
-    MODEL = "claude-sonnet-4-5"
+    MODEL = "Qwen/Qwen2.5-72B-Instruct"
 
     def __init__(self, api_key: str) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = InferenceClient(api_key=api_key)
         self._memory_bank: list[dict[str, Any]] = []
         self._conversation: list[dict[str, str]] = []
 
@@ -127,13 +135,13 @@ class ClaudeInventoryAgent:
         confidence: float
 
         try:
-            response = self._client.messages.create(
+            hf_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+            response = self._client.chat.completions.create(
                 model=self.MODEL,
+                messages=hf_messages,
                 max_tokens=512,
-                system=SYSTEM_PROMPT,
-                messages=messages,
             )
-            raw_text: str = response.content[0].text  # type: ignore[union-attr]
+            raw_text: str = response.choices[0].message.content
 
             try:
                 parsed = self._parse_response(raw_text)
@@ -253,8 +261,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--api-key",
         type=str,
-        default=os.environ.get("ANTHROPIC_API_KEY", ""),
-        help="Anthropic API key (defaults to ANTHROPIC_API_KEY env var).",
+        default=os.environ.get("HF_TOKEN", ""),
+        help="HuggingFace token (defaults to HF_TOKEN env var).",
     )
     return parser.parse_args()
 
@@ -263,7 +271,7 @@ if __name__ == "__main__":
     args = _parse_args()
 
     if not args.api_key:
-        print("Error: no Anthropic API key provided. Set ANTHROPIC_API_KEY or use --api-key.")
+        print("Error: no HuggingFace token provided. Set HF_TOKEN or use --api-key.")
         sys.exit(1)
 
     asyncio.run(

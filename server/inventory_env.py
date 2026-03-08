@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from config import (
     SIM_DAYS, HISTO_DAYS, LEAD_TIME,
     WRITE_OFF_RATE, WRITE_OFF_FREQUENCY,
+    UNIT_COST, SELLING_PRICE, FIXED_ORDER_COST,
 )
 from demand_environment import (
     GammaPoisson, GammaGammaHighVariance, SpikingDemand, SingleGammaLowVariance,
@@ -87,6 +88,8 @@ class EpisodeState:
         self.total_fulfilled: float = 0.0
         self.stockouts: int = 0
         self.lost_sales: float = 0.0
+        self.cumulative_profit: float = 0.0
+        self.baseline_profit: float = 0.0
         self.initialized: bool = False
 
     def get_obs(self) -> InventoryObservation:
@@ -139,6 +142,11 @@ def reset(env_type: int = 0):
     episode.day = HISTO_DAYS
     episode.initialized = True
 
+    # Compute baseline profit: expected daily profit at full service (no stockouts)
+    episode_demand = episode.demand_series[HISTO_DAYS:]
+    mean_demand = float(np.mean(episode_demand)) if episode_demand else 0.0
+    episode.baseline_profit = mean_demand * (SELLING_PRICE - UNIT_COST)
+
     return episode.get_obs()
 
 
@@ -162,18 +170,25 @@ def step(action: InventoryAction):
         o for o in episode.order_processor.order_queue if o.arrival_day > day
     ]
 
-    # 2. Fulfill demand
-    fulfilled = min(demand, episode.inventory)
+    # 2. Daily spoilage (0.143% per day)
+    spoilage = episode.inventory * WRITE_OFF_RATE
+    writeoff_cost = spoilage * UNIT_COST
+    episode.inventory = max(0.0, episode.inventory - spoilage)
+    episode.performance_tracker.write_offs += spoilage
+
+    # 3. Fulfill demand
+    units_sold = min(demand, episode.inventory)
     episode.inventory = max(0.0, episode.inventory - demand)
-    lost = max(0.0, demand - fulfilled)
+    lost = max(0.0, demand - units_sold)
     if lost > 0:
         episode.stockouts += 1
     episode.lost_sales += lost
     episode.total_demand += demand
-    episode.total_fulfilled += fulfilled
+    episode.total_fulfilled += units_sold
 
-    # 3. Reorder if inventory at or below ROP
+    # 4. Reorder if inventory at or below ROP
     rop = max(0.0, action.reorder_point)
+    qty = 0
     if day < SIM_DAYS - LEAD_TIME and episode.inventory <= rop:
         hist = episode.demand_series[max(0, day - 30):day]
         mean_demand = float(np.mean(hist)) if hist else 0.0
@@ -181,27 +196,43 @@ def step(action: InventoryAction):
         if qty > 0:
             episode.order_processor.place_order(day, int(qty))
 
-    # 4. Weekly write-off
-    if day % WRITE_OFF_FREQUENCY == 0:
-        writeoff = int(episode.inventory * WRITE_OFF_RATE)
-        episode.inventory -= writeoff
-        episode.performance_tracker.write_offs += writeoff
-
     # 5. Track performance
     episode.performance_tracker.daily_performance(
         demand_quantity=demand,
-        fulfilled_demand=int(fulfilled),
-        daily_writeoff=0,  # already applied above
+        fulfilled_demand=int(units_sold),
+        daily_writeoff=0,
     )
 
     episode.day += 1
     done = episode.day >= SIM_DAYS
 
+    # 6. Compute dense daily P&L reward
+    revenue = units_sold * SELLING_PRICE
+    holding_cost = episode.inventory * UNIT_COST * 0.005
+    stockout_penalty = lost * (SELLING_PRICE - UNIT_COST)
+    order_cost = (FIXED_ORDER_COST if qty > 0 else 0.0) + qty * UNIT_COST
+
+    daily_profit = revenue - holding_cost - stockout_penalty - order_cost - writeoff_cost
+    episode.cumulative_profit += daily_profit
+
+    baseline = episode.baseline_profit
+    daily_reward = daily_profit / baseline if baseline > 0 else 0.0
+
+    # 7. Sparse episode bonus at end
     fill_rate = (
         episode.total_fulfilled / episode.total_demand
         if episode.total_demand > 0 else 0.0
     )
-    reward = fill_rate if done else -0.001
+    if done:
+        episode_length = SIM_DAYS - HISTO_DAYS
+        profit_ratio = (
+            episode.cumulative_profit / (baseline * episode_length)
+            if baseline > 0 else 0.0
+        )
+        episode_bonus = fill_rate * 0.5 + profit_ratio * 0.5
+        reward = daily_reward + episode_bonus
+    else:
+        reward = daily_reward
 
     return StepResult(
         observation=episode.get_obs(),
@@ -211,6 +242,9 @@ def step(action: InventoryAction):
             "fill_rate": fill_rate,
             "stockouts": episode.stockouts,
             "lost_sales": episode.lost_sales,
+            "inventory_in": delivered,
+            "units_sold": units_sold,
+            "daily_profit": daily_profit,
             "reasoning_logged": action.reasoning[:200] if action.reasoning else "",
         },
     )

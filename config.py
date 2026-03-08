@@ -8,11 +8,17 @@ N_SIMULATIONS = 100
 MC_SIMS = 1000
 
 # Replenishment constraints & constants
-WRITE_OFF_RATE = 0.01
-WRITE_OFF_FREQUENCY = 7
+WRITE_OFF_RATE = 0.00143   # ~0.143% daily spoilage (≈ 1% per week)
+WRITE_OFF_FREQUENCY = 1    # applied every day
+
+# Economic parameters
+UNIT_COST = 10.0           # purchase cost per unit
+SELLING_PRICE = 25.0       # revenue per unit sold
+FIXED_ORDER_COST = 150.0   # fixed cost per order placed
 
 # Stock constraints
 LEAD_TIME = 3
+LEAD_TIME_JITTER = 1       # ±1 day randomness on lead time
 BASE_STOCK = 0
 DEFAULT_SERVICE_LEVEL = 0.95
 
