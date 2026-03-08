@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from dataclasses import dataclass, asdict
 from typing import List, Optional
 import numpy as np
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -258,6 +259,30 @@ def state():
         stockouts=episode.stockouts,
         lost_sales=episode.lost_sales,
     )
+
+
+# ── HF Inference API proxy (avoids browser CSP restrictions on HF Spaces) ────
+
+class QwenRequest(BaseModel):
+    model: str
+    messages: list
+    max_tokens: int = 600
+    temperature: float = 0.7
+    hf_token: str = ""
+
+@app.post("/api/qwen", include_in_schema=False)
+async def qwen_proxy(req: QwenRequest):
+    token = req.hf_token or os.environ.get("HF_TOKEN", "")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"https://api-inference.huggingface.co/models/{req.model}/v1/chat/completions"
+    payload = {"model": req.model, "messages": req.messages, "max_tokens": req.max_tokens, "temperature": req.temperature}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    return resp.json()
 
 
 # ── Serve React frontend (static files built by Dockerfile) ──────────────────

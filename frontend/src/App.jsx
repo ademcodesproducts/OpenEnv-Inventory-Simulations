@@ -177,16 +177,12 @@ function runOneSimulation(computeROP, demandSeries, envKey) {
   };
 }
 
-// ─── HF INFERENCE API ─────────────────────────────────────────────────────────
+// ─── HF INFERENCE API (proxied through FastAPI to avoid CSP on HF Spaces) ────
 async function callQwen(messages, modelId, hfToken) {
-  const url = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
-  const resp = await fetch(url, {
+  const resp = await fetch("/api/qwen", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(hfToken ? { Authorization: `Bearer ${hfToken}` } : {}),
-    },
-    body: JSON.stringify({ model: modelId, messages, max_tokens: 600, temperature: 0.7 }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: modelId, messages, max_tokens: 600, temperature: 0.7, hf_token: hfToken || "" }),
   });
   if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`);
   const data = await resp.json();
