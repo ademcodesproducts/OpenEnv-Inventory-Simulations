@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -13,7 +13,6 @@ COPY config.py demand_calculator.py demand_environment.py \
 COPY server/ ./server/
 COPY agent/ ./agent/
 COPY client/ ./client/
-COPY scripts/ ./scripts/
 
 RUN useradd -m user
 USER user
