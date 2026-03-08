@@ -19,7 +19,10 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Any
+
+from tqdm import tqdm
 
 import datasets
 import numpy as np
@@ -31,6 +34,24 @@ from trl import GRPOConfig, GRPOTrainer
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from client.inventory_client import InventoryAction, InventoryEnvClient, InventoryObservation
+
+
+# ── Logging helpers ───────────────────────────────────────────────────────────
+
+def _gpu_mem_str() -> str:
+    if not torch.cuda.is_available():
+        return "no GPU"
+    allocated = torch.cuda.memory_allocated() / 1024 ** 3
+    reserved  = torch.cuda.memory_reserved()  / 1024 ** 3
+    total     = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+    return f"{allocated:.1f}GB alloc / {reserved:.1f}GB reserved / {total:.0f}GB total"
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m{s:02d}s"
+
 
 # ── Prompt constants ──────────────────────────────────────────────────────────
 
@@ -160,64 +181,85 @@ async def _run_episode_async(
     rows: list[dict[str, str]] = []
     memory_bank: list[dict[str, Any]] = []
     use_heuristic = model is None or episode_idx == 0
+    parse_failures = 0
+    step_times: list[float] = []
 
     async with InventoryEnvClient(base_url=base_url) as env:
         obs: InventoryObservation = await env.reset(env_type=env_type)
         done = False
         step = 0
 
-        while not done:
-            obs_dict: dict[str, Any] = {
-                "day": obs.day,
-                "days_remaining": obs.days_remaining,
-                "current_inventory": round(obs.current_inventory, 2),
-                "demand_last_5": [round(d, 2) for d in obs.demand_last_5],
-                "demand_mean_30d": round(obs.demand_mean_30d, 2),
-                "demand_std_30d": round(obs.demand_std_30d, 2),
-                "fill_rate_so_far": round(obs.fill_rate_so_far, 4),
-                "recent_stockouts": obs.recent_stockouts,
-                "recent_lost_sales": round(obs.recent_lost_sales, 2),
-                "pending_orders": [
-                    {"arrival_day": o.arrival_day, "quantity": o.quantity}
-                    for o in obs.pending_orders
-                ],
-            }
+        with tqdm(total=365, desc=f"  ep{episode_idx+1}", unit="step",
+                  dynamic_ncols=True, leave=False) as pbar:
+            while not done:
+                t0 = time.time()
+                obs_dict: dict[str, Any] = {
+                    "day": obs.day,
+                    "days_remaining": obs.days_remaining,
+                    "current_inventory": round(obs.current_inventory, 2),
+                    "demand_last_5": [round(d, 2) for d in obs.demand_last_5],
+                    "demand_mean_30d": round(obs.demand_mean_30d, 2),
+                    "demand_std_30d": round(obs.demand_std_30d, 2),
+                    "fill_rate_so_far": round(obs.fill_rate_so_far, 4),
+                    "recent_stockouts": obs.recent_stockouts,
+                    "recent_lost_sales": round(obs.recent_lost_sales, 2),
+                    "pending_orders": [
+                        {"arrival_day": o.arrival_day, "quantity": o.quantity}
+                        for o in obs.pending_orders
+                    ],
+                }
 
-            messages = format_prompt(obs_dict, memory_bank)
-            prompt_str: str = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-
-            if use_heuristic:
-                rop = obs.demand_mean_30d * 3 + obs.demand_std_30d * 1.65
-            else:
-                completion = _generate_completion(
-                    model, tokenizer, prompt_str, device
-                )
-                rop_parsed = parse_rop(completion)
-                rop = rop_parsed if rop_parsed is not None else (
-                    obs.demand_mean_30d * 3 + obs.demand_std_30d * 1.65
+                messages = format_prompt(obs_dict, memory_bank)
+                prompt_str: str = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
                 )
 
-            result = await env.step(InventoryAction(reorder_point=rop))
-            obs = result.observation
-            done = result.done
+                if use_heuristic:
+                    rop = obs.demand_mean_30d * 3 + obs.demand_std_30d * 1.65
+                else:
+                    completion = _generate_completion(
+                        model, tokenizer, prompt_str, device
+                    )
+                    rop_parsed = parse_rop(completion)
+                    if rop_parsed is None:
+                        parse_failures += 1
+                        rop = obs.demand_mean_30d * 3 + obs.demand_std_30d * 1.65
+                    else:
+                        rop = rop_parsed
 
-            rows.append({
-                "prompt": prompt_str,
-                "obs_json": json.dumps(obs_dict),
-                "step_reward": float(result.reward),
-            })
+                result = await env.step(InventoryAction(reorder_point=rop))
+                obs = result.observation
+                done = result.done
+                reward = result.reward
 
-            memory_bank = (memory_bank + [{
-                "day": obs_dict["day"],
-                "reorder_point": round(rop, 2),
-                "fill_rate_after": round(obs.fill_rate_so_far, 4),
-            }])[-MEMORY_SIZE:]
+                rows.append({
+                    "prompt": prompt_str,
+                    "obs_json": json.dumps(obs_dict),
+                    "step_reward": float(reward),
+                })
 
-            step += 1
+                memory_bank = (memory_bank + [{
+                    "day": obs_dict["day"],
+                    "reorder_point": round(rop, 2),
+                    "fill_rate_after": round(obs.fill_rate_so_far, 4),
+                }])[-MEMORY_SIZE:]
+
+                elapsed = time.time() - t0
+                step_times.append(elapsed)
+                avg_step = sum(step_times[-20:]) / len(step_times[-20:])
+
+                pbar.update(1)
+                pbar.set_postfix({
+                    "day":    obs_dict["day"],
+                    "fill":   f"{obs.fill_rate_so_far:.3f}",
+                    "rop":    f"{rop:.0f}",
+                    "rew":    f"{reward:+.2f}",
+                    "fails":  parse_failures,
+                    "s/step": f"{avg_step:.2f}",
+                })
+                step += 1
 
     return rows
 
@@ -236,17 +278,29 @@ def collect_rollout_dataset(
     subsequent episodes use the model.
     """
     all_rows: list[dict[str, str]] = []
+    collect_start = time.time()
 
     for ep in range(n_episodes):
         use_heuristic = model is None or ep == 0
         mode = "heuristic" if use_heuristic else "model"
-        print(f"  Collecting episode {ep + 1}/{n_episodes} ({mode})...")
+        ep_start = time.time()
+        print(f"  Episode {ep + 1}/{n_episodes} [{mode}]...", flush=True)
         rows = asyncio.run(
             _run_episode_async(model, tokenizer, base_url, env_type, ep, device)
         )
         all_rows.extend(rows)
-        print(f"    Episode {ep + 1} collected {len(rows)} steps (total so far: {len(all_rows)})")
+        ep_dur = time.time() - ep_start
+        steps_per_sec = len(rows) / ep_dur if ep_dur > 0 else 0
+        remaining_eps = n_episodes - (ep + 1)
+        eta = _fmt_duration(ep_dur * remaining_eps)
+        print(
+            f"    ✓ {len(rows)} steps in {_fmt_duration(ep_dur)} "
+            f"({steps_per_sec:.1f} steps/s) | total={len(all_rows)} | ETA: {eta}",
+            flush=True,
+        )
 
+    total_dur = time.time() - collect_start
+    print(f"  Collection done: {len(all_rows)} steps in {_fmt_duration(total_dur)}", flush=True)
     return datasets.Dataset.from_list(all_rows)
 
 
@@ -308,6 +362,8 @@ def setup_model_and_tokenizer(
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
+    device_used = next(model.parameters()).device
+    print(f"  Model device: {device_used}  |  GPU memory: {_gpu_mem_str()}", flush=True)
     return model, tokenizer
 
 
@@ -338,30 +394,36 @@ def train(
     model: AutoModelForCausalLM | None = None
     tokenizer: AutoTokenizer | None = None
 
+    run_start = time.time()
+
     for iteration in range(n_iterations):
-        print(f"\n{'='*60}")
-        print(f"ITERATION {iteration + 1}/{n_iterations}")
-        print(f"{'='*60}")
+        iter_start = time.time()
+        print(f"\n{'='*60}", flush=True)
+        print(f"ITERATION {iteration + 1}/{n_iterations}  |  GPU: {_gpu_mem_str()}", flush=True)
+        print(f"{'='*60}", flush=True)
 
         if iteration == 0:
-            print("\n[Phase 0] Setting up model and tokenizer...")
+            print("\n[Phase 0] Setting up model and tokenizer...", flush=True)
+            t0 = time.time()
             model, tokenizer = setup_model_and_tokenizer(
                 base_model, lora_rank, lora_alpha, device
             )
+            print(f"  Done in {_fmt_duration(time.time() - t0)}", flush=True)
 
-        print(f"\n[Phase 1] Collecting rollout dataset ({episodes_per_iter} episodes)...")
+        print(f"\n[Phase 1] Collecting rollout dataset ({episodes_per_iter} episodes)...", flush=True)
+        t0 = time.time()
         dataset = collect_rollout_dataset(
             model, tokenizer, base_url, env_type, episodes_per_iter, device
         )
-        print(f"  Dataset size: {len(dataset)} steps")
+        print(f"  Dataset: {len(dataset)} steps in {_fmt_duration(time.time() - t0)}  |  GPU: {_gpu_mem_str()}", flush=True)
 
-        print("\n[Phase 2] Building reward function...")
         reward_fn = build_reward_fn(tokenizer)
 
         iter_output_dir = os.path.join(output_dir, f"iter_{iteration}")
         os.makedirs(iter_output_dir, exist_ok=True)
 
-        print(f"\n[Phase 2] Configuring GRPOTrainer (output: {iter_output_dir})...")
+        print(f"\n[Phase 2] Training (output: {iter_output_dir})...", flush=True)
+        t0 = time.time()
         grpo_config = GRPOConfig(
             output_dir=iter_output_dir,
             num_train_epochs=1,
@@ -372,7 +434,7 @@ def train(
             temperature=0.9,
             learning_rate=learning_rate,
             bf16=True,
-            logging_steps=10,
+            logging_steps=5,
             save_steps=0,
             report_to="none",
         )
@@ -385,26 +447,29 @@ def train(
             processing_class=tokenizer,
         )
 
-        print("[Phase 2] Training...")
         train_result = trainer.train()
-
+        train_dur = time.time() - t0
         train_loss = train_result.training_loss if hasattr(train_result, "training_loss") else "N/A"
-        print(f"  Training complete. Loss: {train_loss}")
+        print(f"  Training done in {_fmt_duration(train_dur)} | loss={train_loss}  |  GPU: {_gpu_mem_str()}", flush=True)
 
-        print(f"\n[Phase 3] Saving LoRA adapter to {iter_output_dir}...")
+        print(f"\n[Phase 3] Saving LoRA adapter to {iter_output_dir}...", flush=True)
         model.save_pretrained(iter_output_dir)
         tokenizer.save_pretrained(iter_output_dir)
 
+        iter_dur = time.time() - iter_start
+        elapsed_total = time.time() - run_start
+        remaining_iters = n_iterations - (iteration + 1)
+        eta = _fmt_duration((elapsed_total / (iteration + 1)) * remaining_iters)
         print(
-            f"\nIteration {iteration + 1} summary: "
-            f"dataset_size={len(dataset)}, "
-            f"loss={train_loss}, "
-            f"adapter_saved={iter_output_dir}"
+            f"\n── Iteration {iteration + 1}/{n_iterations} done in {_fmt_duration(iter_dur)} "
+            f"| loss={train_loss} | ETA remaining: {eta} ──",
+            flush=True,
         )
 
-    print(f"\n{'='*60}")
-    print(f"Training complete. {n_iterations} iterations finished.")
-    print(f"Final adapter: {os.path.join(output_dir, f'iter_{n_iterations - 1}')}")
+    total_dur = time.time() - run_start
+    print(f"\n{'='*60}", flush=True)
+    print(f"Training complete in {_fmt_duration(total_dur)}. {n_iterations} iterations.", flush=True)
+    print(f"Final adapter: {os.path.join(output_dir, f'iter_{n_iterations - 1}')}", flush=True)
 
 
 # ── Eval runner ───────────────────────────────────────────────────────────────
