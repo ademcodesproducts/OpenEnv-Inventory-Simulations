@@ -22,14 +22,18 @@ import sys
 import time
 from typing import Any
 
+os.environ['UNSLOTH_VLLM_STANDBY'] = "1"  # saves 30%+ memory during RL by keeping vLLM in standby
+
 from tqdm import tqdm
+
+import unsloth  # must be imported before trl/transformers/peft
+from unsloth import FastLanguageModel
 
 import datasets
 import numpy as np
 import torch
 from transformers import AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
-from unsloth import FastLanguageModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -85,7 +89,7 @@ RESPONSE FORMAT — reply with ONLY a valid JSON object, no markdown fences:
 {"reorder_point": <float>, "reasoning": "<concise explanation>", "confidence": <float 0-1>}
 """
 
-MEMORY_SIZE = 15
+MEMORY_SIZE = 100
 
 
 # ── Prompt formatting ─────────────────────────────────────────────────────────
@@ -245,7 +249,11 @@ async def _run_episode_async(
                 memory_bank = (memory_bank + [{
                     "day": obs_dict["day"],
                     "reorder_point": round(rop, 2),
-                    "fill_rate_after": round(obs.fill_rate_so_far, 4),
+                    "fill_rate_cumulative": round(obs.fill_rate_so_far, 4),
+                    "inventory_on_hand": round(obs.current_inventory, 2),
+                    "avg_demand_last_30d": round(obs.demand_mean_30d, 2),
+                    "demand_std_last_30d": round(obs.demand_std_30d, 2),
+                    "same_period_last_year_demand": [round(d, 2) for d in obs.demand_last_year_7d],
                 }])[-MEMORY_SIZE:]
 
                 elapsed = time.time() - t0
@@ -432,6 +440,8 @@ def setup_model_and_tokenizer(
         max_seq_length=2048,
         load_in_4bit=False,
         fast_inference=True,
+        load_in_fp8=True,
+        max_lora_rank=lora_rank,
     )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
@@ -441,7 +451,7 @@ def setup_model_and_tokenizer(
         r=lora_rank,
         lora_alpha=lora_alpha,
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.05,
+        lora_dropout=0,
         bias="none",
         use_gradient_checkpointing="unsloth",
         random_state=42,
@@ -463,7 +473,7 @@ def train(
     n_iterations: int = 5,
     episodes_per_iter: int = 20,
     lora_rank: int = 16,
-    lora_alpha: int = 32,
+    lora_alpha: int = -1,  # -1 means auto: lora_rank * 2
     device: str = "auto",
     num_generations: int = 4,
     per_device_batch_size: int = 2,
@@ -474,6 +484,9 @@ def train(
     """
     Outer GRPO training loop: collect → train → save, repeated n_iterations times.
     """
+    if lora_alpha == -1:
+        lora_alpha = lora_rank * 2
+
     os.makedirs(output_dir, exist_ok=True)
 
     model: Any | None = None
@@ -644,7 +657,11 @@ async def _eval_episode_async(
             memory_bank = (memory_bank + [{
                 "day": obs_dict["day"],
                 "reorder_point": round(rop, 2),
-                "fill_rate_after": round(obs.fill_rate_so_far, 4),
+                "fill_rate_cumulative": round(obs.fill_rate_so_far, 4),
+                "inventory_on_hand": round(obs.current_inventory, 2),
+                "avg_demand_last_30d": round(obs.demand_mean_30d, 2),
+                "demand_std_last_30d": round(obs.demand_std_30d, 2),
+                "same_period_last_year_demand": [round(d, 2) for d in obs.demand_last_year_7d],
             }])[-MEMORY_SIZE:]
 
             step += 1
