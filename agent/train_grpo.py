@@ -348,7 +348,7 @@ def setup_model_and_tokenizer(
     print(f"Loading model from {base_model} (bfloat16)...")
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map=device,
     )
 
@@ -572,7 +572,7 @@ def run_eval(
 
     base = AutoModelForCausalLM.from_pretrained(
         base_model,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map=device,
     )
     model = PeftModel.from_pretrained(base, adapter_path)
