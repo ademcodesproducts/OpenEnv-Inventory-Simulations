@@ -304,27 +304,109 @@ def collect_rollout_dataset(
     return datasets.Dataset.from_list(all_rows)
 
 
-# ── Reward function factory ───────────────────────────────────────────────────
-# TODO: plug in your reward function here.
-# build_reward_fn must return a callable with signature:
-#   reward_fn(prompts, completions, **dataset_columns) -> list[float]
-# Dataset columns (e.g. terminal_fill_rate) are passed as kwargs automatically by GRPOTrainer.
+# ── Analytical reward ─────────────────────────────────────────────────────────
+
+UNIT_COST = 10.0
+SELLING_PRICE = 25.0
+FIXED_ORDER_COST = 150.0
+HOLDING_RATE = 0.005
+WRITE_OFF_RATE = 0.00143
+LEAD_TIME = 3
+LOOKAHEAD_DAYS = 365
+TARGET_FILL_RATE = 0.95
+FILL_RATE_WEIGHT = 0.4
+
+
+def _simulate_rop(obs: dict[str, Any], rop: float) -> float:
+    """
+    Run a deterministic LOOKAHEAD_DAYS-day forward simulation with the
+    proposed ROP starting from the observation state. Returns a composite
+    reward combining:
+      - Normalised cumulative P&L (60% weight)
+      - Fill rate vs 95% target (40% weight)
+    """
+    inv = obs["current_inventory"]
+    mean_d = obs["demand_mean_30d"]
+    std_d = obs.get("demand_std_30d", 0.0)
+    current_day = obs["day"]
+    days_remaining = obs.get("days_remaining", 365)
+
+    pending: list[tuple[int, float]] = [
+        (p["arrival_day"], p["quantity"])
+        for p in obs.get("pending_orders", [])
+    ]
+
+    horizon = min(LOOKAHEAD_DAYS, days_remaining)
+    if horizon <= 0 or mean_d <= 0:
+        return 0.0
+
+    total_profit = 0.0
+    total_sold = 0.0
+    total_demand = 0.0
+
+    for t in range(horizon):
+        day = current_day + t
+
+        delivered = sum(qty for arr, qty in pending if arr == day)
+        inv += delivered
+        pending = [(arr, qty) for arr, qty in pending if arr > day]
+
+        spoilage = inv * WRITE_OFF_RATE
+        inv = max(0.0, inv - spoilage)
+
+        demand = mean_d + (std_d * 0.3 if t % 5 == 0 else 0.0)
+        sold = min(demand, inv)
+        lost = max(0.0, demand - inv)
+        inv = max(0.0, inv - demand)
+        total_sold += sold
+        total_demand += demand
+
+        order_qty = 0.0
+        if inv <= rop:
+            order_qty = max(0.0, rop - inv + mean_d * LEAD_TIME)
+            pending.append((day + LEAD_TIME, order_qty))
+
+        revenue = sold * SELLING_PRICE
+        holding_cost = inv * UNIT_COST * HOLDING_RATE
+        stockout_penalty = lost * (SELLING_PRICE - UNIT_COST)
+        order_cost = (FIXED_ORDER_COST if order_qty > 0 else 0.0) + order_qty * UNIT_COST
+        writeoff_cost = spoilage * UNIT_COST
+
+        total_profit += revenue - holding_cost - stockout_penalty - order_cost - writeoff_cost
+
+    baseline = mean_d * (SELLING_PRICE - UNIT_COST) * horizon
+    pnl_reward = total_profit / baseline if baseline > 0 else 0.0
+
+    sim_fill_rate = total_sold / total_demand if total_demand > 0 else 0.0
+    if sim_fill_rate >= TARGET_FILL_RATE:
+        fill_reward = 1.0
+    else:
+        fill_reward = -(TARGET_FILL_RATE - sim_fill_rate) / TARGET_FILL_RATE
+
+    return (1.0 - FILL_RATE_WEIGHT) * pnl_reward + FILL_RATE_WEIGHT * fill_reward
+
 
 def build_reward_fn(tokenizer: AutoTokenizer):  # noqa: ARG001
     def reward_fn(
         prompts: list[str],
         completions: list[str],
-        step_reward: list[float] | None = None,
+        obs_json: list[str] | None = None,
         **kwargs: Any,
     ) -> list[float]:
-        if step_reward is None:
-            return [0.0] * len(completions)
         rewards: list[float] = []
-        for completion, sr in zip(completions, step_reward):
-            r = sr[0] if isinstance(sr, list) else float(sr)
-            # Penalise completions that don't parse to a valid ROP
-            if parse_rop(completion) is None:
-                r -= 0.2
+        for i, completion in enumerate(completions):
+            rop = parse_rop(completion)
+            if rop is None:
+                rewards.append(-1.0)
+                continue
+
+            if obs_json is not None:
+                raw = obs_json[i]
+                obs = json.loads(raw[0] if isinstance(raw, list) else raw)
+                r = _simulate_rop(obs, rop)
+            else:
+                r = 0.0
+
             rewards.append(float(np.clip(r, -2.0, 2.0)))
         return rewards
     return reward_fn
