@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config.py demand_calculator.py demand_environment.py \
      inventory_manager.py order_processor.py performance_tracker.py \
-     agent_environment.py montecarlo_simulator.py main.py ./
+     agent_environment.py montecarlo_simulator.py reward.py main.py app.py ./
 COPY server/ ./server/
 COPY agent/ ./agent/
 COPY client/ ./client/
@@ -20,4 +20,4 @@ ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH
 
 EXPOSE 7860
 
-CMD ["uvicorn", "server.inventory_env:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["python", "app.py"]
