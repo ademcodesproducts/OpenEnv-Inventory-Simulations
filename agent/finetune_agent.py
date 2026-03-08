@@ -73,7 +73,7 @@ class QwenInventoryAgent:
         self._tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         base_model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map=device,
         )
         if adapter_path is not None:

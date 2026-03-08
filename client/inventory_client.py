@@ -51,6 +51,7 @@ class InventoryObservation:
     recent_lost_sales: float
     days_remaining: int
     pending_orders: List[PendingOrder]
+    demand_last_year_7d: List[float]
 
     @classmethod
     def from_dict(cls, d: dict) -> "InventoryObservation":
@@ -65,6 +66,7 @@ class InventoryObservation:
             recent_lost_sales=d["recent_lost_sales"],
             days_remaining=d["days_remaining"],
             pending_orders=[PendingOrder(**o) for o in d["pending_orders"]],
+            demand_last_year_7d=d.get("demand_last_year_7d", []),
         )
 
 

@@ -27,9 +27,9 @@ from tqdm import tqdm
 import datasets
 import numpy as np
 import torch
-from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
+from unsloth import FastLanguageModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -107,6 +107,7 @@ def format_prompt(obs_dict: dict[str, Any], memory_bank: list[dict[str, Any]]) -
         "recent_stockouts": obs_dict["recent_stockouts"],
         "recent_lost_sales": round(obs_dict["recent_lost_sales"], 2),
         "pending_orders": obs_dict.get("pending_orders", []),
+        "demand_last_year_7d": [round(d, 2) for d in obs_dict.get("demand_last_year_7d", [])],
         "memory_bank": memory_bank[-MEMORY_SIZE:],
     }
     user_content = json.dumps(snapshot, separators=(",", ":"))
@@ -136,7 +137,7 @@ def parse_rop(completion_text: str) -> float | None:
 
 
 def _generate_completion(
-    model: AutoModelForCausalLM,
+    model: Any,
     tokenizer: AutoTokenizer,
     prompt_str: str,
     device: str,
@@ -166,7 +167,7 @@ def _generate_completion(
 
 
 async def _run_episode_async(
-    model: AutoModelForCausalLM | None,
+    model: Any | None,
     tokenizer: AutoTokenizer,
     base_url: str,
     env_type: int,
@@ -207,6 +208,7 @@ async def _run_episode_async(
                         {"arrival_day": o.arrival_day, "quantity": o.quantity}
                         for o in obs.pending_orders
                     ],
+                    "demand_last_year_7d": [round(d, 2) for d in obs.demand_last_year_7d],
                 }
 
                 messages = format_prompt(obs_dict, memory_bank)
@@ -265,7 +267,7 @@ async def _run_episode_async(
 
 
 def collect_rollout_dataset(
-    model: AutoModelForCausalLM | None,
+    model: Any | None,
     tokenizer: AutoTokenizer,
     base_url: str,
     env_type: int,
@@ -304,27 +306,111 @@ def collect_rollout_dataset(
     return datasets.Dataset.from_list(all_rows)
 
 
-# ── Reward function factory ───────────────────────────────────────────────────
-# TODO: plug in your reward function here.
-# build_reward_fn must return a callable with signature:
-#   reward_fn(prompts, completions, **dataset_columns) -> list[float]
-# Dataset columns (e.g. terminal_fill_rate) are passed as kwargs automatically by GRPOTrainer.
+# ── Analytical reward ─────────────────────────────────────────────────────────
+
+UNIT_COST = 10.0
+SELLING_PRICE = 25.0
+FIXED_ORDER_COST = 150.0
+HOLDING_RATE = 0.005
+WRITE_OFF_RATE = 0.00143
+LEAD_TIME = 3
+LOOKAHEAD_DAYS = 30
+TARGET_FILL_RATE = 0.95
+FILL_RATE_WEIGHT = 0.4
+
+
+def _simulate_rop(obs: dict[str, Any], rop: float) -> float:
+    """
+    Run a deterministic LOOKAHEAD_DAYS-day forward simulation with the
+    proposed ROP starting from the observation state. Returns a composite
+    reward combining:
+      - Normalised cumulative P&L (60% weight)
+      - Fill rate vs 95% target (40% weight)
+    """
+    inv = obs["current_inventory"]
+    mean_d = obs["demand_mean_30d"]
+    std_d = obs.get("demand_std_30d", 0.0)
+    current_day = obs["day"]
+    days_remaining = obs.get("days_remaining", 365)
+
+    pending: list[tuple[int, float]] = [
+        (p["arrival_day"], p["quantity"])
+        for p in obs.get("pending_orders", [])
+    ]
+
+    horizon = min(LOOKAHEAD_DAYS, days_remaining)
+    if horizon <= 0 or mean_d <= 0:
+        return 0.0
+
+    total_profit = 0.0
+    total_sold = 0.0
+    total_demand = 0.0
+
+    for t in range(horizon):
+        day = current_day + t
+
+        delivered = sum(qty for arr, qty in pending if arr == day)
+        inv += delivered
+        pending = [(arr, qty) for arr, qty in pending if arr > day]
+
+        spoilage = inv * WRITE_OFF_RATE
+        inv = max(0.0, inv - spoilage)
+
+        demand = mean_d + (std_d * 0.3 if t % 5 == 0 else 0.0)
+        sold = min(demand, inv)
+        lost = max(0.0, demand - inv)
+        inv = max(0.0, inv - demand)
+        total_sold += sold
+        total_demand += demand
+
+        order_qty = 0.0
+        pipeline = sum(qty for arr, qty in pending)
+        inv_position = inv + pipeline
+        if inv_position <= rop:
+            order_qty = max(0.0, rop - inv_position + mean_d * LEAD_TIME)
+            pending.append((day + LEAD_TIME, order_qty))
+
+        revenue = sold * SELLING_PRICE
+        holding_cost = inv * UNIT_COST * HOLDING_RATE
+        stockout_penalty = lost * (SELLING_PRICE - UNIT_COST)
+        order_cost = (FIXED_ORDER_COST if order_qty > 0 else 0.0) + order_qty * UNIT_COST
+        writeoff_cost = spoilage * UNIT_COST
+
+        total_profit += revenue - holding_cost - stockout_penalty - order_cost - writeoff_cost
+
+    baseline = mean_d * (SELLING_PRICE - UNIT_COST) * horizon
+    pnl_reward = total_profit / baseline if baseline > 0 else 0.0
+
+    sim_fill_rate = total_sold / total_demand if total_demand > 0 else 0.0
+    if sim_fill_rate >= TARGET_FILL_RATE:
+        fill_reward = 1.0
+    else:
+        fill_reward = -(TARGET_FILL_RATE - sim_fill_rate) / TARGET_FILL_RATE
+
+    return (1.0 - FILL_RATE_WEIGHT) * pnl_reward + FILL_RATE_WEIGHT * fill_reward
+
 
 def build_reward_fn(tokenizer: AutoTokenizer):  # noqa: ARG001
     def reward_fn(
         prompts: list[str],
         completions: list[str],
-        step_reward: list[float] | None = None,
+        obs_json: list[str] | None = None,
         **kwargs: Any,
     ) -> list[float]:
-        if step_reward is None:
-            return [0.0] * len(completions)
         rewards: list[float] = []
-        for completion, sr in zip(completions, step_reward):
-            r = sr[0] if isinstance(sr, list) else float(sr)
-            # Penalise completions that don't parse to a valid ROP
-            if parse_rop(completion) is None:
-                r -= 0.2
+        for i, completion in enumerate(completions):
+            rop = parse_rop(completion)
+            if rop is None:
+                rewards.append(-1.0)
+                continue
+
+            if obs_json is not None:
+                raw = obs_json[i]
+                obs = json.loads(raw[0] if isinstance(raw, list) else raw)
+                r = _simulate_rop(obs, rop)
+            else:
+                r = 0.0
+
             rewards.append(float(np.clip(r, -2.0, 2.0)))
         return rewards
     return reward_fn
@@ -338,29 +424,28 @@ def setup_model_and_tokenizer(
     lora_rank: int,
     lora_alpha: int,
     device: str,
-) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """Load base model + tokenizer and wrap with LoRA adapters."""
-    print(f"Loading tokenizer from {base_model}...")
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
+) -> tuple[Any, AutoTokenizer]:
+    """Load base model + tokenizer via Unsloth and wrap with LoRA adapters."""
+    print(f"Loading model and tokenizer from {base_model} via Unsloth (bfloat16)...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=base_model,
+        max_seq_length=2048,
+        load_in_4bit=False,
+        fast_inference=True,
+    )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    print(f"Loading model from {base_model} (bfloat16)...")
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        torch_dtype=torch.bfloat16,
-        device_map=device,
-    )
-
-    lora_config = LoraConfig(
+    model = FastLanguageModel.get_peft_model(
+        model,
         r=lora_rank,
         lora_alpha=lora_alpha,
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         lora_dropout=0.05,
         bias="none",
-        task_type=TaskType.CAUSAL_LM,
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
     )
-    model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     device_used = next(model.parameters()).device
     print(f"  Model device: {device_used}  |  GPU memory: {_gpu_mem_str()}", flush=True)
@@ -391,18 +476,41 @@ def train(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    model: AutoModelForCausalLM | None = None
+    model: Any | None = None
     tokenizer: AutoTokenizer | None = None
 
     run_start = time.time()
 
     for iteration in range(n_iterations):
+        iter_output_dir = os.path.join(output_dir, f"iter_{iteration}")
+        dataset_dir = os.path.join(output_dir, f"dataset_iter_{iteration}")
+        adapter_marker = os.path.join(iter_output_dir, "adapter_config.json")
+
+        # ── Skip completed iterations ──────────────────────────────────────────
+        if os.path.exists(adapter_marker):
+            print(f"\n[SKIP] Iteration {iteration + 1}/{n_iterations} already complete "
+                  f"(found {adapter_marker})", flush=True)
+            # Still need to load model for subsequent iterations
+            if model is None:
+                print("[Phase 0] Loading adapter from checkpoint via Unsloth...", flush=True)
+                model, _tok = FastLanguageModel.from_pretrained(
+                    model_name=iter_output_dir,
+                    max_seq_length=2048,
+                    load_in_4bit=False,
+                    fast_inference=True,
+                )
+                _tok.pad_token = _tok.eos_token
+                _tok.padding_side = "left"
+                tokenizer = _tok
+                print(f"  Loaded adapter from {iter_output_dir}  |  GPU: {_gpu_mem_str()}", flush=True)
+            continue
+
         iter_start = time.time()
         print(f"\n{'='*60}", flush=True)
         print(f"ITERATION {iteration + 1}/{n_iterations}  |  GPU: {_gpu_mem_str()}", flush=True)
         print(f"{'='*60}", flush=True)
 
-        if iteration == 0:
+        if model is None:
             print("\n[Phase 0] Setting up model and tokenizer...", flush=True)
             t0 = time.time()
             model, tokenizer = setup_model_and_tokenizer(
@@ -410,16 +518,23 @@ def train(
             )
             print(f"  Done in {_fmt_duration(time.time() - t0)}", flush=True)
 
-        print(f"\n[Phase 1] Collecting rollout dataset ({episodes_per_iter} episodes)...", flush=True)
-        t0 = time.time()
-        dataset = collect_rollout_dataset(
-            model, tokenizer, base_url, env_type, episodes_per_iter, device
-        )
-        print(f"  Dataset: {len(dataset)} steps in {_fmt_duration(time.time() - t0)}  |  GPU: {_gpu_mem_str()}", flush=True)
+        # ── Phase 1: collect or reload saved dataset ───────────────────────────
+        if os.path.exists(dataset_dir):
+            print(f"\n[Phase 1] Loading saved rollout dataset from {dataset_dir}...", flush=True)
+            dataset = datasets.load_from_disk(dataset_dir)
+            print(f"  Loaded {len(dataset)} steps  |  GPU: {_gpu_mem_str()}", flush=True)
+        else:
+            print(f"\n[Phase 1] Collecting rollout dataset ({episodes_per_iter} episodes)...", flush=True)
+            t0 = time.time()
+            dataset = collect_rollout_dataset(
+                model, tokenizer, base_url, env_type, episodes_per_iter, device
+            )
+            print(f"  Dataset: {len(dataset)} steps in {_fmt_duration(time.time() - t0)}  |  GPU: {_gpu_mem_str()}", flush=True)
+            print(f"  Saving dataset to {dataset_dir}...", flush=True)
+            dataset.save_to_disk(dataset_dir)
 
         reward_fn = build_reward_fn(tokenizer)
 
-        iter_output_dir = os.path.join(output_dir, f"iter_{iteration}")
         os.makedirs(iter_output_dir, exist_ok=True)
 
         print(f"\n[Phase 2] Training (output: {iter_output_dir})...", flush=True)
@@ -430,12 +545,11 @@ def train(
             per_device_train_batch_size=per_device_batch_size,
             gradient_accumulation_steps=grad_accum,
             num_generations=num_generations,
-            max_new_tokens=max_new_tokens,
-            temperature=0.9,
+            max_completion_length=max_new_tokens,
             learning_rate=learning_rate,
             bf16=True,
             logging_steps=5,
-            save_steps=0,
+            save_strategy="no",
             report_to="none",
         )
 
@@ -476,7 +590,7 @@ def train(
 
 
 async def _eval_episode_async(
-    model: AutoModelForCausalLM,
+    model: Any,
     tokenizer: AutoTokenizer,
     base_url: str,
     env_type: int,
@@ -506,6 +620,7 @@ async def _eval_episode_async(
                     {"arrival_day": o.arrival_day, "quantity": o.quantity}
                     for o in obs.pending_orders
                 ],
+                "demand_last_year_7d": [round(d, 2) for d in obs.demand_last_year_7d],
             }
 
             messages = format_prompt(obs_dict, memory_bank)
@@ -562,21 +677,16 @@ def run_eval(
     env_type: int,
     device: str,
 ) -> None:
-    """Load a saved LoRA adapter and run one evaluation episode."""
-    from peft import PeftModel
-
-    print(f"Loading base model {base_model} for eval...")
-    tokenizer = AutoTokenizer.from_pretrained(adapter_path)
+    """Load a saved LoRA adapter via Unsloth and run one evaluation episode."""
+    print(f"Loading adapter from {adapter_path} via Unsloth...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=adapter_path,
+        max_seq_length=2048,
+        load_in_4bit=False,
+    )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
-
-    base = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        torch_dtype=torch.bfloat16,
-        device_map=device,
-    )
-    model = PeftModel.from_pretrained(base, adapter_path)
-    model.eval()
+    FastLanguageModel.for_inference(model)
     print("Model loaded. Running eval episode...")
     asyncio.run(_eval_episode_async(model, tokenizer, base_url, env_type, device))
 
