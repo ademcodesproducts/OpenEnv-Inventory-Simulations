@@ -20,8 +20,8 @@ import sys
 from typing import Any
 
 import torch
-from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -70,17 +70,19 @@ class QwenInventoryAgent:
         adapter_path: str | None = None,
         device: str = "auto",
     ) -> None:
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-        base_model = AutoModelForCausalLM.from_pretrained(
+        _model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
             device_map=device,
         )
         if adapter_path is not None:
-            self._model = PeftModel.from_pretrained(base_model, adapter_path)
-        else:
-            self._model = base_model
-        self._model.eval()
+            _model = PeftModel.from_pretrained(_model, adapter_path)
+        _model.eval()
+        tokenizer_source = adapter_path if adapter_path is not None else model_name_or_path
+        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+        self._tokenizer.pad_token = self._tokenizer.eos_token
+        self._tokenizer.padding_side = "left"
+        self._model = _model
         self._memory_bank: list[dict[str, Any]] = []
 
     # ── Internal helpers ──────────────────────────────────────────────────────
