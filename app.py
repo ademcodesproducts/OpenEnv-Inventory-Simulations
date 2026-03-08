@@ -151,13 +151,17 @@ def run_simulation(agent_name, env_name):
         })
 
     summary = performance_tracker.performance_summary()
+    total_profit = sum(d["daily_profit"] for d in daily_pnl)
+    days_elapsed = len(daily_pnl)
+    service_level = (days_elapsed - summary['stock_out_count']) / days_elapsed if days_elapsed > 0 else 0.0
     fig = build_chart(daily_inventory, running_fill_rate, [], f"{agent_name}  |  {env_name}", daily_pnl)
     metrics = (
+        f"**Total Profit:** ${total_profit:,.0f}  \n"
+        f"**Service Level:** {service_level:.2%}  \n"
         f"**Fill Rate:** {summary['fill_rate']:.2%}  \n"
         f"**Stockouts:** {summary['stock_out_count']}  \n"
-        f"**Total Lost Sales:** {summary['total_lost_sales']:.0f}  \n"
-        f"**Write-offs:** {summary['write_offs']:.0f}  \n"
-        f"**Total Demand:** {summary['total_demand']:.0f}"
+        f"**Lost Sales:** {summary['total_lost_sales']:.0f}  \n"
+        f"**Write-offs:** {summary['write_offs']:.0f}"
     )
     return fig, metrics
 
@@ -299,7 +303,12 @@ def run_llm_simulation(env_name, hf_token):
             fig = build_chart(daily_inventory, running_fill_rate, rop_markers,
                               f"Qwen2.5-72B  |  {env_name}  |  Day {day}/{SIM_DAYS}", daily_pnl)
             summary = performance_tracker.performance_summary()
+            total_profit = sum(d["daily_profit"] for d in daily_pnl)
+            days_elapsed = len(daily_pnl)
+            service_level = (days_elapsed - summary['stock_out_count']) / days_elapsed if days_elapsed > 0 else 0.0
             metrics = (
+                f"**Total Profit:** ${total_profit:,.0f}  \n"
+                f"**Service Level:** {service_level:.2%}  \n"
                 f"**Fill Rate:** {summary['fill_rate']:.2%}  \n"
                 f"**Stockouts:** {summary['stock_out_count']}  \n"
                 f"**Lost Sales:** {summary['total_lost_sales']:.0f}  \n"
@@ -313,7 +322,12 @@ def run_llm_simulation(env_name, hf_token):
     fig = build_chart(daily_inventory, running_fill_rate, rop_markers,
                       f"Qwen2.5-72B  |  {env_name}  |  COMPLETE", daily_pnl)
     summary = performance_tracker.performance_summary()
+    total_profit = sum(d["daily_profit"] for d in daily_pnl)
+    days_elapsed = len(daily_pnl)
+    service_level = (days_elapsed - summary['stock_out_count']) / days_elapsed if days_elapsed > 0 else 0.0
     metrics = (
+        f"**Total Profit:** ${total_profit:,.0f}  \n"
+        f"**Service Level:** {service_level:.2%}  \n"
         f"**Fill Rate:** {summary['fill_rate']:.2%}  \n"
         f"**Stockouts:** {summary['stock_out_count']}  \n"
         f"**Lost Sales:** {summary['total_lost_sales']:.0f}  \n"
