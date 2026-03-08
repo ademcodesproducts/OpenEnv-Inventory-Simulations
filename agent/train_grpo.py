@@ -25,7 +25,6 @@ import datasets
 import numpy as np
 import torch
 from peft import LoraConfig, TaskType, get_peft_model
-from scipy.stats import norm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
 
@@ -110,38 +109,6 @@ def parse_rop(completion_text: str) -> float | None:
             return float(match.group(1))
         return None
 
-
-def compute_proxy_reward(obs_dict: dict[str, Any], rop: float) -> float:
-    """
-    Compute a local reward (no HTTP needed) given an observation dict and a proposed reorder point.
-    Returns a value clipped to [-1, 1].
-    """
-    LEAD_TIME = 3
-    inventory = obs_dict["current_inventory"]
-    mean_demand = obs_dict["demand_mean_30d"]
-    std_demand = obs_dict["demand_std_30d"]
-    pending_qty = sum(o["quantity"] for o in obs_dict.get("pending_orders", []))
-
-    coverage_without_order = inventory + pending_qty
-
-    if coverage_without_order <= rop:
-        order_qty = max(0.0, rop - coverage_without_order + mean_demand * LEAD_TIME)
-        coverage_with_order = coverage_without_order + order_qty
-    else:
-        coverage_with_order = coverage_without_order
-
-    days_coverage = coverage_with_order / max(mean_demand, 1.0)
-
-    safety_days = norm.ppf(0.95) * std_demand / max(mean_demand, 1.0) * (LEAD_TIME ** 0.5)
-    target_days = LEAD_TIME + safety_days
-
-    deviation = abs(days_coverage - target_days) / max(target_days, 1.0)
-    reward = float(max(0.0, 1.0 - 2.0 * deviation))
-
-    if days_coverage < LEAD_TIME:
-        reward -= 1.0 * (LEAD_TIME - days_coverage) / LEAD_TIME
-
-    return float(np.clip(reward, -1.0, 1.0))
 
 
 # ── Model generation helper ───────────────────────────────────────────────────
@@ -234,11 +201,15 @@ async def _run_episode_async(
                     obs.demand_mean_30d * 3 + obs.demand_std_30d * 1.65
                 )
 
-            rows.append({"prompt": prompt_str, "obs_json": json.dumps(obs_dict)})
-
             result = await env.step(InventoryAction(reorder_point=rop))
             obs = result.observation
             done = result.done
+
+            rows.append({
+                "prompt": prompt_str,
+                "obs_json": json.dumps(obs_dict),
+                "step_reward": float(result.reward),
+            })
 
             memory_bank = (memory_bank + [{
                 "day": obs_dict["day"],
@@ -280,41 +251,28 @@ def collect_rollout_dataset(
 
 
 # ── Reward function factory ───────────────────────────────────────────────────
-
+# TODO: plug in your reward function here.
+# build_reward_fn must return a callable with signature:
+#   reward_fn(prompts, completions, **dataset_columns) -> list[float]
+# Dataset columns (e.g. terminal_fill_rate) are passed as kwargs automatically by GRPOTrainer.
 
 def build_reward_fn(tokenizer: AutoTokenizer):  # noqa: ARG001
-    """
-    Returns a closure compatible with TRL's GRPOTrainer reward_funcs interface.
-    Handles both list[str] and list[list[str]] batching from TRL internals.
-    """
-
     def reward_fn(
         prompts: list[str],
         completions: list[str],
-        obs_json: list[str] | None = None,
+        step_reward: list[float] | None = None,
         **kwargs: Any,
     ) -> list[float]:
-        if obs_json is None:
-            return [-1.0] * len(completions)
-
+        if step_reward is None:
+            return [0.0] * len(completions)
         rewards: list[float] = []
-        for completion, obs_j in zip(completions, obs_json):
-            if isinstance(obs_j, list):
-                obs_j = obs_j[0] if obs_j else "{}"
-            try:
-                obs_dict = json.loads(obs_j)
-            except (json.JSONDecodeError, TypeError):
-                rewards.append(-1.0)
-                continue
-
-            rop = parse_rop(completion)
-            if rop is None:
-                rewards.append(-1.0)
-            else:
-                rewards.append(compute_proxy_reward(obs_dict, rop))
-
+        for completion, sr in zip(completions, step_reward):
+            r = sr[0] if isinstance(sr, list) else float(sr)
+            # Penalise completions that don't parse to a valid ROP
+            if parse_rop(completion) is None:
+                r -= 0.2
+            rewards.append(float(np.clip(r, -2.0, 2.0)))
         return rewards
-
     return reward_fn
 
 
