@@ -125,10 +125,8 @@
       ]
     }
   },
-  "name": "Jupyter PyTorch Notebook",
-  "description": "Jupyter notebook with CUDA & PyTorch preinstalled",
   "options": {
-    "autorun": false,
+    "autorun": true,
     "concurrencyPolicy": "allow"
   },
   "gitops": {
