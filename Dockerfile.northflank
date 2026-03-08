@@ -16,15 +16,12 @@ RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir "torch==2.6.0" && \
-    pip install --no-cache-dir "xformers==0.0.29.post2" && \
-    pip install --no-cache-dir vllm && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --upgrade --force-reinstall --no-cache-dir --no-deps unsloth unsloth_zoo
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config.py demand_calculator.py demand_environment.py \
      inventory_manager.py order_processor.py performance_tracker.py \
-     agent_environment.py montecarlo_simulator.py reward.py main.py ./
+     agent_environment.py montecarlo_simulator.py reward.py main.py \
+     models.py inventory_env_client.py openenv.yaml ./
 COPY server/ ./server/
 COPY agent/ ./agent/
 COPY client/ ./client/
