@@ -28,7 +28,7 @@ from config import SIM_DAYS, HISTO_DAYS, LEAD_TIME
 # ── Server ─────────────────────────────────────────────────────────────────────
 
 BASE_URL = "http://127.0.0.1:7861"
-DECISION_INTERVAL = 5  # Claude decides every N days
+DECISION_INTERVAL = 5  # Qwen decides every N days
 
 ENV_NAMES = {
     0: "GammaPoisson",

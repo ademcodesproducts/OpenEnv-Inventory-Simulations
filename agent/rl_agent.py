@@ -53,6 +53,7 @@ class InventoryGymEnv(gym.Env):
         self._base_url = base_url
         self._env_type = env_type
 
+        self._loop = asyncio.new_event_loop()
         self._http_client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
         self._inv_client = InventoryEnvClient(base_url)
         self._inv_client._client = self._http_client
@@ -75,11 +76,11 @@ class InventoryGymEnv(gym.Env):
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict]:
         super().reset(seed=seed)
-        obs = asyncio.run(self._inv_client.reset(env_type=self._env_type))
+        obs = self._loop.run_until_complete(self._inv_client.reset(env_type=self._env_type))
         return self._obs_to_array(obs), {}
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
-        result = asyncio.run(
+        result = self._loop.run_until_complete(
             self._inv_client.step(InventoryAction(reorder_point=float(action[0])))
         )
         return (
@@ -91,7 +92,8 @@ class InventoryGymEnv(gym.Env):
         )
 
     def close(self) -> None:
-        asyncio.run(self._http_client.aclose())
+        self._loop.run_until_complete(self._http_client.aclose())
+        self._loop.close()
 
     # ------------------------------------------------------------------
     # Helper
