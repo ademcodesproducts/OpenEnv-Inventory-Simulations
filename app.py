@@ -527,4 +527,4 @@ with gr.Blocks(title="Inventory Simulation") as demo:
                 outputs=[llm_chart, llm_metrics, llm_log],
             )
 
-demo.launch(server_name=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"), server_port=7860)
+demo.launch(server_name=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"))
