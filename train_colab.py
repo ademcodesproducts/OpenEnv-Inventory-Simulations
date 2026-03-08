@@ -3,10 +3,10 @@ Minimal GRPO training script for the Inventory Reasoning Environment.
 
 Designed to run in Google Colab with a single GPU. Connects to the
 OpenEnv-compatible HF Space and fine-tunes Qwen2.5-3B-Instruct using
-Unsloth + TRL's GRPOTrainer with a custom rollout_func.
+HuggingFace TRL's GRPOTrainer + PEFT LoRA.
 
 Usage (Colab):
-    !pip install "openenv-core[core]>=0.2.1" unsloth trl datasets
+    !pip install "openenv-core[core]>=0.2.1" torch transformers trl peft accelerate datasets
     !pip install git+https://huggingface.co/spaces/ademarteau/rl-inventory-simulations
     %run train_colab.py
 """
@@ -18,8 +18,10 @@ import re
 from typing import Any
 
 import numpy as np
+import torch
 from datasets import Dataset
-from unsloth import FastLanguageModel
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
 
 # ── Connect to the OpenEnv Inventory Environment on HF Spaces ────────────────
@@ -176,28 +178,28 @@ def collect_episode(tokenizer, env_url: str, env_type: int = 0) -> list[dict]:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Loading model via Unsloth...")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name="Qwen/Qwen2.5-3B-Instruct",
-        max_seq_length=2048,
-        load_in_4bit=True,
-        fast_inference=True,
-        max_lora_rank=16,
+    print("Loading model (bfloat16)...")
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-3B-Instruct",
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
     )
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    model = FastLanguageModel.get_peft_model(
-        model,
+    lora_config = LoraConfig(
         r=16,
         lora_alpha=32,
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
         lora_dropout=0,
         bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=42,
+        task_type="CAUSAL_LM",
     )
+    model = get_peft_model(model, lora_config)
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
     model.print_trainable_parameters()
 
     n_iterations = 3
