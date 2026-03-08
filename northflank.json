@@ -1,0 +1,140 @@
+{
+  "apiVersion": "v1.2",
+  "spec": {
+    "kind": "Workflow",
+    "spec": {
+      "type": "sequential",
+      "steps": [
+        {
+          "kind": "Project",
+          "ref": "project",
+          "spec": {
+            "name": "Hackathon",
+            "color": "#57637A",
+            "networking": {
+              "tailscale": {
+                "authKeyTags": [],
+                "enabled": false
+              },
+              "allowedIngressProjects": []
+            },
+            "region": "meta-openenv"
+          }
+        },
+        {
+          "kind": "Workflow",
+          "spec": {
+            "type": "sequential",
+            "context": {
+              "projectId": "${refs.project.id}"
+            },
+            "steps": [
+              {
+                "kind": "DeploymentService",
+                "spec": {
+                  "deployment": {
+                    "instances": 1,
+                    "storage": {
+                      "ephemeralStorage": {
+                        "storageSize": 102400
+                      },
+                      "shmSize": 64
+                    },
+                    "docker": {
+                      "configType": "default"
+                    },
+                    "ssh": {
+                      "enabled": true
+                    },
+                    "external": {
+                      "imagePath": "quay.io/jupyter/pytorch-notebook:cuda12-2025-08-18"
+                    },
+                    "gpu": {
+                      "enabled": true,
+                      "configuration": {
+                        "gpuType": "h100-80",
+                        "gpuCount": 1,
+                        "timesliced": false
+                      }
+                    },
+                    "metadata": {
+                      "labels": {},
+                      "annotations": {}
+                    },
+                    "type": "deployment"
+                  },
+                  "loadBalancing": {
+                    "mode": "leastConnection"
+                  },
+                  "billing": {
+                    "deploymentPlan": "nf-gpu-hack-16-192-gpu"
+                  },
+                  "runtimeEnvironment": {},
+                  "runtimeFiles": {},
+                  "infrastructure": {
+                    "architecture": "x86"
+                  },
+                  "name": "Jupyter PyTorch",
+                  "ports": [
+                    {
+                      "internalPort": 8888,
+                      "protocol": "HTTP",
+                      "public": true,
+                      "name": "app",
+                      "domains": [],
+                      "security": {
+                        "policies": [],
+                        "credentials": [],
+                        "securePathConfiguration": {
+                          "rules": []
+                        }
+                      },
+                      "disableNfDomain": false
+                    }
+                  ]
+                },
+                "ref": "jupyter-pytorch"
+              },
+              {
+                "kind": "Volume",
+                "spec": {
+                  "spec": {
+                    "accessMode": "ReadWriteMany",
+                    "storageSize": 102400,
+                    "storageClassName": "nf-multi-rw"
+                  },
+                  "mounts": [
+                    {
+                      "containerMountPath": "/home/jovyan",
+                      "volumeMountPath": ""
+                    }
+                  ],
+                  "name": "jupyter-data",
+                  "attachedObjects": [
+                    {
+                      "id": "${refs.jupyter-pytorch.id}",
+                      "type": "service"
+                    }
+                  ]
+                },
+                "ref": "jupyter-data"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "options": {
+    "autorun": true,
+    "concurrencyPolicy": "allow"
+  },
+  "gitops": {
+    "repoUrl": "https://github.com/ademcodesproducts/OpenEnv-Inventory-Simulations",
+    "vcsService": "github",
+    "accountLogin": "ademcodesproducts",
+    "branch": "main",
+    "filePath": "/northflank.json"
+  },
+  "$schema": "https://api.northflank.com/v1/schemas/template"
+}
