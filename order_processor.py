@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import List
-from config import LEAD_TIME
+import numpy as np
+from config import LEAD_TIME, LEAD_TIME_JITTER
 
 @dataclass
 class Order:
@@ -12,7 +13,8 @@ class OrderProcessor:
         self.order_queue: List[Order] = [] # self.order_queue stores Order objects
 
     def place_order(self, time_period: int, quantity: int):
-        arrival_day = time_period + LEAD_TIME # time_period = current_day
+        jitter = np.random.randint(-LEAD_TIME_JITTER, LEAD_TIME_JITTER + 1)
+        arrival_day = max(time_period + 1, time_period + LEAD_TIME + jitter)
         self.order_queue.append(Order(arrival_day=arrival_day, quantity=quantity))
 
     def manage_order(self, time_period: int) -> int:

@@ -57,8 +57,6 @@ class InventoryGymEnv(gym.Env):
         self._inv_client = InventoryEnvClient(base_url)
         self._inv_client._client = self._http_client
 
-        self._last_fill_rate: float = 0.0
-
         self.observation_space = spaces.Box(
             low=0.0,
             high=np.inf,
@@ -78,26 +76,15 @@ class InventoryGymEnv(gym.Env):
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict]:
         super().reset(seed=seed)
         obs = asyncio.run(self._inv_client.reset(env_type=self._env_type))
-        self._last_fill_rate = 0.0
         return self._obs_to_array(obs), {}
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         result = asyncio.run(
             self._inv_client.step(InventoryAction(reorder_point=float(action[0])))
         )
-        obs = result.observation
-
-        fill_rate_delta = obs.fill_rate_so_far - self._last_fill_rate
-        shaped_reward = (
-            fill_rate_delta * 10.0
-            - obs.recent_lost_sales * 0.01
-            - obs.current_inventory * 0.0001
-        )
-        self._last_fill_rate = obs.fill_rate_so_far
-
         return (
-            self._obs_to_array(obs),
-            float(shaped_reward),
+            self._obs_to_array(result.observation),
+            float(result.reward),
             result.done,
             False,
             result.info,
