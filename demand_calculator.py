@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Tuple
 from config import LEAD_TIME
 
-
+#Demand_Calculator
 np.random.seed(42)
 
 @dataclass

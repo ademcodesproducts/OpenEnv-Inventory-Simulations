@@ -5,7 +5,7 @@ from config import SHAPE_GAMMA_POISSON, LAMBDA_GAMMA_POISSON, SCALE_GAMMA_POISSO
     SCALE_GAMMA_GAMMA_LOW_MEAN, SHAPE_GAMMA_GAMMA_HIGH_MEAN, SCALE_GAMMA_GAMMA_HIGH_MEAN, SHAPE_GAMMA_LOW_VAR, \
     SCALE_GAMMA_LOW_VAR, RATE_SPORADIC_HIGH
 from demand_calculator import DailyDemandDistribution, DemandCalculator
-
+#Demand_Environment
 class Environment(ABC):
     def __init__(self, sim_days: int):
         self.sim_days = sim_days

@@ -4,7 +4,7 @@ from demand_calculator import DemandCalculator
 from order_processor import OrderProcessor
 from inventory_manager import InventoryManager
 from performance_tracker import PerformanceTracker
-
+#MC_Simulator
 class MonteCarloSimulator():
     def __init__(self, agent, environment):
         self.agent = agent

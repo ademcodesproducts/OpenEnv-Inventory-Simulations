@@ -1,5 +1,5 @@
 from config import WRITE_OFF_RATE, BASE_STOCK, DEFAULT_SERVICE_LEVEL, MC_SIMS
-
+#Inventory_Manager
 class InventoryManager:
     def __init__(self, order_processor, agent):
         self.inventory = BASE_STOCK

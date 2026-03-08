@@ -5,7 +5,7 @@ from demand_calculator import DemandCalculator
 from config import SIM_DAYS, N_SIMULATIONS
 import ciw
 ciw.seed(11)
-
+#Main
 simulation_version = input("Choose a simulation version (0-3):\n"
                          "0: Historical Demand Agent\n"
                          "1: Safety Stock Agent\n" 
