@@ -13,7 +13,6 @@ COPY config.py demand_calculator.py demand_environment.py \
 COPY server/ ./server/
 COPY agent/ ./agent/
 COPY client/ ./client/
-COPY scripts/ ./scripts/
 
 RUN useradd -m user
 USER user
