@@ -1,5 +1,13 @@
-FROM python:3.13-slim
+# ── Stage 1: Build React frontend ────────────────────────────────────────────
+FROM node:20-slim AS frontend-build
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
 
+# ── Stage 2: Python app ───────────────────────────────────────────────────────
+FROM python:3.13-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y build-essential git && rm -rf /var/lib/apt/lists/*
@@ -14,10 +22,13 @@ COPY server/ ./server/
 COPY agent/ ./agent/
 COPY client/ ./client/
 
+# Copy built React app
+COPY --from=frontend-build /frontend/dist ./static/
+
 RUN useradd -m user
 USER user
-ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH GRADIO_SERVER_NAME=0.0.0.0 GRADIO_SERVER_PORT=7860
+ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH
 
 EXPOSE 7860
 
-CMD ["python", "app.py"]
+CMD ["uvicorn", "server.inventory_env:app", "--host", "0.0.0.0", "--port", "7860"]

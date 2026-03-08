@@ -6,6 +6,8 @@ from dataclasses import dataclass, asdict
 from typing import List, Optional
 import numpy as np
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from config import (
@@ -256,3 +258,16 @@ def state():
         stockouts=episode.stockouts,
         lost_sales=episode.lost_sales,
     )
+
+
+# ── Serve React frontend (static files built by Dockerfile) ──────────────────
+_static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_static_dir, "assets")), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str = ""):
+        # API routes are handled above; everything else serves the React app
+        index = os.path.join(_static_dir, "index.html")
+        return FileResponse(index)
