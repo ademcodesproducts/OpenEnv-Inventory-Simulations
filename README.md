@@ -3,13 +3,14 @@ title: Inventory Reasoning Environment
 emoji: 📦
 colorFrom: blue
 colorTo: green
-sdk: gradio
+sdk: docker
 tags:
   - openenv
   - reinforcement-learning
   - inventory-optimization
   - long-horizon
 license: apache-2.0
+app_port: 7860
 ---
 
 # Inventory Simulations

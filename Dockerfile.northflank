@@ -24,7 +24,8 @@ RUN pip install --no-cache-dir "torch==2.6.0" && \
 
 COPY config.py demand_calculator.py demand_environment.py \
      inventory_manager.py order_processor.py performance_tracker.py \
-     agent_environment.py montecarlo_simulator.py reward.py main.py ./
+     agent_environment.py montecarlo_simulator.py reward.py main.py \
+     models.py inventory_env_client.py openenv.yaml ./
 COPY server/ ./server/
 COPY agent/ ./agent/
 COPY client/ ./client/

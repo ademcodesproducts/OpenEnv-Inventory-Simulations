@@ -1,0 +1,3 @@
+name: inventory_env
+version: 0.1.0
+description: "Stochastic inventory optimization environment with P&L-based rewards"

@@ -1,6 +1,9 @@
 """
 Async HTTP client for the Inventory Reasoning Environment.
 
+Compatible with both the OpenEnv server (server/app.py using create_app) and
+the legacy FastAPI server (server/inventory_env.py).
+
 Usage:
     import asyncio
     from client.inventory_client import InventoryEnvClient, InventoryAction
@@ -83,7 +86,7 @@ class StepResult:
             observation=InventoryObservation.from_dict(d["observation"]),
             reward=d["reward"],
             done=d["done"],
-            info=d["info"],
+            info=d.get("info", {}),
         )
 
 
@@ -93,11 +96,13 @@ class InventoryEnvClient:
     """
     Async client for the inventory environment server.
 
+    Works with both the OpenEnv server (create_app) and the legacy FastAPI server.
+    Auto-detects the server type on first call to reset().
+
     Parameters
     ----------
     base_url : str
-        Base URL of the running server, e.g. "http://localhost:7860" or
-        "https://YOUR_USERNAME-inventory-env.hf.space"
+        Base URL of the running server, e.g. "http://localhost:7860"
     timeout : float
         Request timeout in seconds (default 30).
     """
@@ -106,6 +111,7 @@ class InventoryEnvClient:
         self.base_url = base_url.rstrip("/")
         self._client: httpx.AsyncClient | None = None
         self._timeout = timeout
+        self._openenv_mode: bool | None = None
 
     async def __aenter__(self) -> "InventoryEnvClient":
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=self._timeout)
@@ -119,26 +125,58 @@ class InventoryEnvClient:
         if self._client is None:
             raise RuntimeError("Use 'async with InventoryEnvClient(...) as env:' context manager")
 
+    async def _detect_mode(self):
+        """Detect whether the server is OpenEnv (has /health) or legacy."""
+        if self._openenv_mode is not None:
+            return
+        try:
+            r = await self._client.get("/health")
+            self._openenv_mode = r.status_code == 200
+        except Exception:
+            self._openenv_mode = False
+
     async def reset(self, env_type: int = 0) -> InventoryObservation:
-        """Initialize a new episode. env_type: 0=GammaPoisson, 1=GammaGammaHighVariance,
-        2=SpikingDemand, 3=SingleGammaLowVariance"""
+        """Initialize a new episode."""
         self._ensure_client()
-        r = await self._client.post("/reset", params={"env_type": env_type})
-        r.raise_for_status()
-        return InventoryObservation.from_dict(r.json())
+        await self._detect_mode()
+
+        if self._openenv_mode:
+            r = await self._client.post("/reset", json={"env_type": env_type})
+            r.raise_for_status()
+            data = r.json()
+            return InventoryObservation.from_dict(data["observation"])
+        else:
+            r = await self._client.post("/reset", params={"env_type": env_type})
+            r.raise_for_status()
+            return InventoryObservation.from_dict(r.json())
 
     async def step(self, action: InventoryAction) -> StepResult:
         """Advance one simulation day with the given reorder point."""
         self._ensure_client()
-        r = await self._client.post(
-            "/step",
-            json={"reorder_point": action.reorder_point, "reasoning": action.reasoning},
-        )
-        r.raise_for_status()
-        return StepResult.from_dict(r.json())
+
+        action_payload = {
+            "reorder_point": action.reorder_point,
+            "reasoning": action.reasoning,
+        }
+
+        if self._openenv_mode:
+            r = await self._client.post("/step", json={"action": action_payload})
+            r.raise_for_status()
+            data = r.json()
+            obs_data = data["observation"]
+            return StepResult(
+                observation=InventoryObservation.from_dict(obs_data),
+                reward=data.get("reward", 0.0),
+                done=data.get("done", False),
+                info=obs_data.get("metadata", {}),
+            )
+        else:
+            r = await self._client.post("/step", json=action_payload)
+            r.raise_for_status()
+            return StepResult.from_dict(r.json())
 
     async def state(self) -> dict:
-        """Get current episode metadata without advancing the simulation."""
+        """Get current episode metadata."""
         self._ensure_client()
         r = await self._client.get("/state")
         r.raise_for_status()
