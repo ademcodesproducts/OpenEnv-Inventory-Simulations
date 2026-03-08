@@ -7,7 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from huggingface_hub import InferenceClient
 
-from config import SIM_DAYS, HISTO_DAYS, LEAD_TIME
+from config import SIM_DAYS, HISTO_DAYS, LEAD_TIME, UNIT_COST, SELLING_PRICE, FIXED_ORDER_COST, WRITE_OFF_RATE
 from agent_environment import BaseAgent, SafetyStockAgent, ForecastAgent, MonteCarloAgent
 from demand_environment import GammaPoisson, GammaGammaHighVariance, SpikingDemand, SingleGammaLowVariance
 from demand_calculator import DemandCalculator
@@ -45,9 +45,12 @@ OUTPUT — respond with this exact JSON (no markdown fences):
 
 # ── Shared chart builder ───────────────────────────────────────────────────────
 
-def build_chart(daily_inventory, running_fill_rate, rop_markers, title):
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+def build_chart(daily_inventory, running_fill_rate, rop_markers, title, daily_pnl=None):
+    n_rows = 3 if daily_pnl else 2
+    fig, axes = plt.subplots(n_rows, 1, figsize=(10, 4 + 2.5 * n_rows), sharex=True)
+    ax1, ax2 = axes[0], axes[1]
     days = list(range(len(daily_inventory)))
+
     ax1.plot(days, daily_inventory, color="steelblue", linewidth=0.8)
     if rop_markers:
         rop_days, rop_vals = zip(*rop_markers)
@@ -56,12 +59,35 @@ def build_chart(daily_inventory, running_fill_rate, rop_markers, title):
         ax1.legend(fontsize=8)
     ax1.set_ylabel("Inventory Level")
     ax1.set_title(title)
+
     ax2.plot(days, running_fill_rate, color="seagreen", linewidth=0.8)
     ax2.axhline(y=0.95, color="red", linestyle="--", linewidth=0.6, label="95% target")
     ax2.set_ylabel("Cumulative Fill Rate")
-    ax2.set_xlabel("Evaluation Day")
     ax2.set_ylim(0, 1)
     ax2.legend(fontsize=8)
+
+    if daily_pnl:
+        ax3 = axes[2]
+        revenues       = [r["revenue"]          for r in daily_pnl]
+        holding_costs  = [r["holding_cost"]      for r in daily_pnl]
+        stockout_pens  = [r["stockout_penalty"]  for r in daily_pnl]
+        order_costs    = [r["order_cost"]        for r in daily_pnl]
+        writeoff_costs = [r["writeoff_cost"]     for r in daily_pnl]
+        net_profits    = [r["daily_profit"]      for r in daily_pnl]
+
+        ax3.fill_between(days, revenues, alpha=0.25, color="green", label="Revenue")
+        ax3.plot(days, net_profits,      color="black",  linewidth=0.9, label="Net profit")
+        ax3.fill_between(days, [-h for h in holding_costs],  alpha=0.3, color="royalblue",  label="Holding cost")
+        ax3.fill_between(days, [-s for s in stockout_pens],  alpha=0.3, color="crimson",    label="Stockout penalty")
+        ax3.fill_between(days, [-o for o in order_costs],    alpha=0.25, color="darkorange", label="Order cost")
+        ax3.fill_between(days, [-w for w in writeoff_costs], alpha=0.25, color="purple",     label="Write-off cost")
+        ax3.axhline(y=0, color="grey", linewidth=0.5)
+        ax3.set_ylabel("Daily P&L ($)")
+        ax3.set_xlabel("Evaluation Day")
+        ax3.legend(fontsize=7, ncol=3)
+    else:
+        ax2.set_xlabel("Evaluation Day")
+
     plt.tight_layout()
     return fig
 
@@ -87,14 +113,17 @@ def run_simulation(agent_name, env_name):
     order_processor = OrderProcessor()
     performance_tracker = PerformanceTracker()
     inventory_manager = InventoryManager(order_processor=order_processor, agent=agent)
-    daily_inventory, running_fill_rate = [], []
+    daily_inventory, running_fill_rate, daily_pnl = [], [], []
     total_demand, total_fulfilled = 0, 0
     for day in range(HISTO_DAYS, SIM_DAYS):
         demand_qty = dc.get_daily_demand(day)
         base_inv = inventory_manager.inventory
         inventory_manager.inventory_update(demand_qty)
+        q_before = len(order_processor.order_queue)
         if day < SIM_DAYS - LEAD_TIME:
             inventory_manager.reorder(day)
+        new_orders = order_processor.order_queue[q_before:]
+        ordered_qty = sum(o.quantity for o in new_orders)
         inventory_manager.process_deliveries(day)
         fulfilled = min(demand_qty, base_inv)
         daily_writeoff = inventory_manager.apply_writeoff(day)
@@ -103,8 +132,24 @@ def run_simulation(agent_name, env_name):
         performance_tracker.daily_performance(demand_qty, int(fulfilled), daily_writeoff)
         daily_inventory.append(inventory_manager.inventory)
         running_fill_rate.append(total_fulfilled / total_demand if total_demand > 0 else 0)
+
+        lost = max(0, demand_qty - fulfilled)
+        revenue = fulfilled * SELLING_PRICE
+        holding_cost = inventory_manager.inventory * UNIT_COST * 0.005
+        stockout_penalty = lost * (SELLING_PRICE - UNIT_COST)
+        order_cost = (FIXED_ORDER_COST if ordered_qty > 0 else 0.0) + ordered_qty * UNIT_COST
+        writeoff_cost = daily_writeoff * UNIT_COST
+        daily_pnl.append({
+            "revenue": revenue,
+            "holding_cost": holding_cost,
+            "stockout_penalty": stockout_penalty,
+            "order_cost": order_cost,
+            "writeoff_cost": writeoff_cost,
+            "daily_profit": revenue - holding_cost - stockout_penalty - order_cost - writeoff_cost,
+        })
+
     summary = performance_tracker.performance_summary()
-    fig = build_chart(daily_inventory, running_fill_rate, [], f"{agent_name}  |  {env_name}")
+    fig = build_chart(daily_inventory, running_fill_rate, [], f"{agent_name}  |  {env_name}", daily_pnl)
     metrics = (
         f"**Fill Rate:** {summary['fill_rate']:.2%}  \n"
         f"**Stockouts:** {summary['stock_out_count']}  \n"
@@ -151,7 +196,7 @@ def run_llm_simulation(env_name, hf_token):
     convo_history = []
     memory_bank = []
     current_rop = dc.daily_demand_distribution[HISTO_DAYS].demand_mean * LEAD_TIME
-    daily_inventory, running_fill_rate, rop_markers = [], [], []
+    daily_inventory, running_fill_rate, rop_markers, daily_pnl = [], [], [], []
     total_demand, total_fulfilled = 0, 0
     decision_log = []
 
@@ -162,6 +207,7 @@ def run_llm_simulation(env_name, hf_token):
         inventory_manager.inventory_update(demand_qty)
 
         # Manual reorder using current_rop
+        ordered_qty = 0
         if day < SIM_DAYS - LEAD_TIME and inventory_manager.inventory <= current_rop:
             hist = [dc.daily_demand_distribution[d].actual_demand
                     for d in range(max(0, day - 30), day)]
@@ -169,6 +215,7 @@ def run_llm_simulation(env_name, hf_token):
             qty = max(0, current_rop - inventory_manager.inventory + mean_d * LEAD_TIME)
             if qty > 0:
                 order_processor.place_order(day, int(qty))
+                ordered_qty = qty
 
         inventory_manager.process_deliveries(day)
         fulfilled = min(demand_qty, base_inv)
@@ -179,6 +226,21 @@ def run_llm_simulation(env_name, hf_token):
         daily_inventory.append(inventory_manager.inventory)
         fr = total_fulfilled / total_demand if total_demand > 0 else 0
         running_fill_rate.append(fr)
+
+        lost = max(0, demand_qty - fulfilled)
+        revenue = fulfilled * SELLING_PRICE
+        holding_cost = inventory_manager.inventory * UNIT_COST * 0.005
+        stockout_penalty = lost * (SELLING_PRICE - UNIT_COST)
+        order_cost = (FIXED_ORDER_COST if ordered_qty > 0 else 0.0) + ordered_qty * UNIT_COST
+        writeoff_cost = daily_writeoff * UNIT_COST
+        daily_pnl.append({
+            "revenue": revenue,
+            "holding_cost": holding_cost,
+            "stockout_penalty": stockout_penalty,
+            "order_cost": order_cost,
+            "writeoff_cost": writeoff_cost,
+            "daily_profit": revenue - holding_cost - stockout_penalty - order_cost - writeoff_cost,
+        })
 
         # LLM decision every DECISION_INTERVAL days
         if (day - HISTO_DAYS) % DECISION_INTERVAL == 0 and day < SIM_DAYS - LEAD_TIME:
@@ -233,7 +295,7 @@ def run_llm_simulation(env_name, hf_token):
 
             # Yield live update
             fig = build_chart(daily_inventory, running_fill_rate, rop_markers,
-                              f"Qwen2.5-72B  |  {env_name}  |  Day {day}/{SIM_DAYS}")
+                              f"Qwen2.5-72B  |  {env_name}  |  Day {day}/{SIM_DAYS}", daily_pnl)
             summary = performance_tracker.performance_summary()
             metrics = (
                 f"**Fill Rate:** {summary['fill_rate']:.2%}  \n"
@@ -247,7 +309,7 @@ def run_llm_simulation(env_name, hf_token):
 
     # Final yield
     fig = build_chart(daily_inventory, running_fill_rate, rop_markers,
-                      f"Qwen2.5-72B  |  {env_name}  |  COMPLETE")
+                      f"Qwen2.5-72B  |  {env_name}  |  COMPLETE", daily_pnl)
     summary = performance_tracker.performance_summary()
     metrics = (
         f"**Fill Rate:** {summary['fill_rate']:.2%}  \n"
