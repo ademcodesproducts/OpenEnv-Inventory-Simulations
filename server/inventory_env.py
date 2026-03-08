@@ -53,6 +53,7 @@ class InventoryObservation(BaseModel):
     recent_lost_sales: float
     days_remaining: int
     pending_orders: List[PendingOrder]
+    demand_last_year_7d: List[float]
 
 
 class StepResult(BaseModel):
@@ -101,6 +102,11 @@ class EpisodeState:
             for o in self.order_processor.order_queue[:5]
         ]
 
+        ly_anchor = self.day - 365
+        ly_start = max(0, ly_anchor - 3)
+        ly_end = min(len(self.demand_series), ly_anchor + 4)
+        demand_last_year_7d = [float(d) for d in self.demand_series[ly_start:ly_end]]
+
         return InventoryObservation(
             day=self.day,
             current_inventory=self.inventory,
@@ -115,6 +121,7 @@ class EpisodeState:
             recent_lost_sales=self.lost_sales,
             days_remaining=SIM_DAYS - self.day,
             pending_orders=pending,
+            demand_last_year_7d=demand_last_year_7d,
         )
 
 
@@ -183,8 +190,10 @@ def step(action: InventoryAction):
     qty = 0
     hist = episode.demand_series[max(0, day - 30):day]
     mean_demand = float(np.mean(hist)) if hist else 0.0
-    if day < SIM_DAYS - LEAD_TIME and episode.inventory <= rop:
-        qty = max(0.0, rop - episode.inventory + mean_demand * LEAD_TIME)
+    pipeline = sum(o.quantity for o in episode.order_processor.order_queue)
+    inv_position = episode.inventory + pipeline
+    if day < SIM_DAYS - LEAD_TIME and inv_position <= rop:
+        qty = max(0.0, rop - inv_position + mean_demand * LEAD_TIME)
         if qty > 0:
             episode.order_processor.place_order(day, int(qty))
 

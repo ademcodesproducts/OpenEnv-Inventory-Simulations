@@ -107,6 +107,7 @@ def format_prompt(obs_dict: dict[str, Any], memory_bank: list[dict[str, Any]]) -
         "recent_stockouts": obs_dict["recent_stockouts"],
         "recent_lost_sales": round(obs_dict["recent_lost_sales"], 2),
         "pending_orders": obs_dict.get("pending_orders", []),
+        "demand_last_year_7d": [round(d, 2) for d in obs_dict.get("demand_last_year_7d", [])],
         "memory_bank": memory_bank[-MEMORY_SIZE:],
     }
     user_content = json.dumps(snapshot, separators=(",", ":"))
@@ -207,6 +208,7 @@ async def _run_episode_async(
                         {"arrival_day": o.arrival_day, "quantity": o.quantity}
                         for o in obs.pending_orders
                     ],
+                    "demand_last_year_7d": [round(d, 2) for d in obs.demand_last_year_7d],
                 }
 
                 messages = format_prompt(obs_dict, memory_bank)
@@ -312,7 +314,7 @@ FIXED_ORDER_COST = 150.0
 HOLDING_RATE = 0.005
 WRITE_OFF_RATE = 0.00143
 LEAD_TIME = 3
-LOOKAHEAD_DAYS = 365
+LOOKAHEAD_DAYS = 30
 TARGET_FILL_RATE = 0.95
 FILL_RATE_WEIGHT = 0.4
 
@@ -362,8 +364,10 @@ def _simulate_rop(obs: dict[str, Any], rop: float) -> float:
         total_demand += demand
 
         order_qty = 0.0
-        if inv <= rop:
-            order_qty = max(0.0, rop - inv + mean_d * LEAD_TIME)
+        pipeline = sum(qty for arr, qty in pending)
+        inv_position = inv + pipeline
+        if inv_position <= rop:
+            order_qty = max(0.0, rop - inv_position + mean_d * LEAD_TIME)
             pending.append((day + LEAD_TIME, order_qty))
 
         revenue = sold * SELLING_PRICE
@@ -616,6 +620,7 @@ async def _eval_episode_async(
                     {"arrival_day": o.arrival_day, "quantity": o.quantity}
                     for o in obs.pending_orders
                 ],
+                "demand_last_year_7d": [round(d, 2) for d in obs.demand_last_year_7d],
             }
 
             messages = format_prompt(obs_dict, memory_bank)

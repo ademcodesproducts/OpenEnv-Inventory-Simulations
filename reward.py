@@ -5,7 +5,7 @@ from config import (
 )
 
 # Holding cost rate (fraction of unit cost per day)
-HOLDING_RATE = 0.005
+HOLDING_RATE = 0.02
 
 
 # ── Core P&L computation ───────────────────────────────────────────────────────
