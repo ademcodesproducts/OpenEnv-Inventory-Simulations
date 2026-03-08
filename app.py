@@ -1,4 +1,5 @@
 import json
+import os
 import re
 
 import gradio as gr
@@ -193,7 +194,7 @@ def run_llm_simulation(env_name, hf_token):
         agent=BaseAgent(dc),  # placeholder; we override ROP manually
     )
 
-    client = InferenceClient(token=hf_token or None)
+    client = InferenceClient(token=hf_token or os.environ.get("HF_TOKEN"))
     convo_history = []
     memory_bank = []
     current_rop = dc.daily_demand_distribution[HISTO_DAYS].demand_mean * LEAD_TIME
