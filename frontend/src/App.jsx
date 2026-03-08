@@ -22,6 +22,10 @@ const CFG = {
   SIM_DAYS: 730,
   DECISION_INTERVAL: 5,
   MEMORY_SIZE: 200,
+  SELLING_PRICE: 25.0,
+  UNIT_COST: 10.0,
+  FIXED_ORDER_COST: 150.0,
+  HOLDING_RATE: 0.02,
 };
 
 // ─── MATH HELPERS ─────────────────────────────────────────────────────────────
@@ -124,7 +128,7 @@ function runOneSimulation(computeROP, demandSeries, envKey) {
   const n = demandSeries.length;
   let inventory = 0;
   const orders = [];
-  let totDemand = 0, totFulfilled = 0, totWriteOff = 0, stockOuts = 0, lostSales = 0;
+  let totDemand = 0, totFulfilled = 0, totWriteOff = 0, stockOuts = 0, lostSales = 0, totProfit = 0, servicedays = 0;
   const timeline = [];
 
   for (let day = 0; day < n; day++) {
@@ -138,7 +142,7 @@ function runOneSimulation(computeROP, demandSeries, envKey) {
     const fulfilled = Math.min(demand, inventory);
     inventory = Math.max(0, inventory - demand);
     const lost = Math.max(0, demand - fulfilled);
-    if (lost > 0) stockOuts++;
+    if (lost > 0) stockOuts++; else servicedays++;
     lostSales += lost;
     let rop = 0, ordered = 0;
     if (hist.length >= 5 && day < n - CFG.LEAD_TIME) {
@@ -157,12 +161,19 @@ function runOneSimulation(computeROP, demandSeries, envKey) {
     }
     totDemand += demand;
     totFulfilled += fulfilled;
+    const revenue = fulfilled * CFG.SELLING_PRICE;
+    const holdingCost = inventory * CFG.UNIT_COST * CFG.HOLDING_RATE;
+    const stockoutPenalty = lost * (CFG.SELLING_PRICE - CFG.UNIT_COST);
+    const orderCost = (ordered > 0 ? CFG.FIXED_ORDER_COST : 0) + ordered * CFG.UNIT_COST;
+    const writeoffCost = wo * CFG.UNIT_COST;
+    totProfit += revenue - holdingCost - stockoutPenalty - orderCost - writeoffCost;
     const fillRateCum = totDemand > 0 ? totFulfilled / totDemand : 0;
     timeline.push({ day, demand, inventory: preInv, inventoryAfter: inventory, fulfilled, lost, rop: Math.round(rop), ordered, wo, delivered, fillRateCum });
   }
+  const daysElapsed = n;
   return {
     timeline,
-    metrics: { fillRate: totDemand > 0 ? totFulfilled / totDemand : 0, stockOuts, lostSales, totWriteOff, totDemand, totFulfilled },
+    metrics: { fillRate: totDemand > 0 ? totFulfilled / totDemand : 0, stockOuts, lostSales, totWriteOff, totDemand, totFulfilled, profit: totProfit, serviceLevel: daysElapsed > 0 ? servicedays / daysElapsed : 0 },
   };
 }
 
@@ -234,7 +245,7 @@ async function runAgentLoop({ envKey, modelId, hfToken, onDay, onDecision, onSta
   const env = ENVS[envKey];
   let inventory = 0;
   const orders = [];
-  let totDemand = 0, totFulfilled = 0, totWriteOff = 0, stockOuts = 0, lostSales = 0;
+  let totDemand = 0, totFulfilled = 0, totWriteOff = 0, stockOuts = 0, lostSales = 0, totProfit = 0, servicedays = 0;
   const timeline = [];
   let currentROP = env.demMean * CFG.LEAD_TIME;
   let memory = [];
@@ -252,7 +263,7 @@ async function runAgentLoop({ envKey, modelId, hfToken, onDay, onDecision, onSta
     const fulfilled = Math.min(demand, inventory);
     inventory = Math.max(0, inventory - demand);
     const lost = Math.max(0, demand - fulfilled);
-    if (lost > 0) stockOuts++;
+    if (lost > 0) stockOuts++; else servicedays++;
     lostSales += lost;
     let ordered = 0;
     if (hist.length >= 5 && day < CFG.SIM_DAYS - CFG.LEAD_TIME && inventory <= currentROP) {
@@ -268,6 +279,12 @@ async function runAgentLoop({ envKey, modelId, hfToken, onDay, onDecision, onSta
     }
     totDemand += demand;
     totFulfilled += fulfilled;
+    const revenue = fulfilled * CFG.SELLING_PRICE;
+    const holdingCost = inventory * CFG.UNIT_COST * CFG.HOLDING_RATE;
+    const stockoutPenalty = lost * (CFG.SELLING_PRICE - CFG.UNIT_COST);
+    const orderCost = (ordered > 0 ? CFG.FIXED_ORDER_COST : 0) + ordered * CFG.UNIT_COST;
+    const writeoffCost = wo * CFG.UNIT_COST;
+    totProfit += revenue - holdingCost - stockoutPenalty - orderCost - writeoffCost;
     const fillRateCum = totDemand > 0 ? totFulfilled / totDemand : 0;
     const entry = { day, demand, inventory: preInv, inventoryAfter: inventory, fulfilled, lost, rop: Math.round(currentROP), ordered, wo, delivered, fillRateCum };
     timeline.push(entry);
@@ -313,7 +330,7 @@ async function runAgentLoop({ envKey, modelId, hfToken, onDay, onDecision, onSta
   }
   return {
     timeline,
-    metrics: { fillRate: totDemand > 0 ? totFulfilled / totDemand : 0, stockOuts, lostSales, totWriteOff, totDemand, totFulfilled },
+    metrics: { fillRate: totDemand > 0 ? totFulfilled / totDemand : 0, stockOuts, lostSales, totWriteOff, totDemand, totFulfilled, profit: totProfit, serviceLevel: CFG.SIM_DAYS > 0 ? servicedays / CFG.SIM_DAYS : 0 },
     memory,
   };
 }
@@ -463,7 +480,7 @@ function ComparePanel({ agentMetrics, agentLog, simTimeline, baselineResults }) 
         {agentMetrics && (
           <div style={{ background: "#0a1e18", border: `2px solid ${C.teal}40`, borderRadius: 10, padding: 14 }}>
             <div style={{ fontSize: 9, color: C.teal, letterSpacing: 3, marginBottom: 8 }}>🤖 LLM AGENT</div>
-            {[["Fill Rate", <FillBadge rate={agentMetrics.fillRate} />], ["Stockouts", agentMetrics.stockOuts], ["Lost Sales", agentMetrics.lostSales.toLocaleString()], ["Write-Offs", agentMetrics.totWriteOff.toLocaleString()]].map(([l, v]) => (
+            {[["Profit", `$${Math.round(agentMetrics.profit).toLocaleString()}`], ["Service Level", <FillBadge rate={agentMetrics.serviceLevel} />], ["Fill Rate", <FillBadge rate={agentMetrics.fillRate} />], ["Stockouts", agentMetrics.stockOuts]].map(([l, v]) => (
               <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 5 }}>
                 <span style={{ color: C.muted }}>{l}</span><span style={{ fontWeight: 600 }}>{v}</span>
               </div>
@@ -473,7 +490,7 @@ function ComparePanel({ agentMetrics, agentLog, simTimeline, baselineResults }) 
         {Object.entries(baselineResults).map(([bk, br]) => (
           <div key={bk} style={{ background: C.panel, border: `1px solid ${BASELINES[bk].color}30`, borderRadius: 10, padding: 14 }}>
             <div style={{ fontSize: 9, color: BASELINES[bk].color, letterSpacing: 3, marginBottom: 8 }}>{BASELINES[bk].label.toUpperCase()}</div>
-            {[["Fill Rate", <FillBadge rate={br.metrics.fillRate} />], ["Stockouts", br.metrics.stockOuts], ["Lost Sales", br.metrics.lostSales.toLocaleString()], ["Write-Offs", br.metrics.totWriteOff.toLocaleString()]].map(([l, v]) => (
+            {[["Profit", `$${Math.round(br.metrics.profit).toLocaleString()}`], ["Service Level", <FillBadge rate={br.metrics.serviceLevel} />], ["Fill Rate", <FillBadge rate={br.metrics.fillRate} />], ["Stockouts", br.metrics.stockOuts]].map(([l, v]) => (
               <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 5 }}>
                 <span style={{ color: C.muted }}>{l}</span><span style={{ fontWeight: 600 }}>{v}</span>
               </div>
@@ -600,10 +617,10 @@ function AgentSimView({ label, accentColor, modelId, hfToken, envKey, baselineRe
           </div>
           {metrics && (
             <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
-              <MetricBox label="FILL RATE" value={<FillBadge rate={metrics.fillRate} />} highlight color={accentColor} />
+              <MetricBox label="PROFIT" value={`$${Math.round(metrics.profit).toLocaleString()}`} highlight color={accentColor} />
+              <MetricBox label="SERVICE LEVEL" value={<FillBadge rate={metrics.serviceLevel} />} />
+              <MetricBox label="FILL RATE" value={<FillBadge rate={metrics.fillRate} />} />
               <MetricBox label="STOCKOUTS" value={metrics.stockOuts} />
-              <MetricBox label="LOST SALES" value={metrics.lostSales.toLocaleString()} />
-              <MetricBox label="WRITE-OFFS" value={metrics.totWriteOff.toLocaleString()} />
               <MetricBox label="DECISIONS" value={log.length} />
             </div>
           )}
@@ -804,7 +821,7 @@ export default function StockOracle() {
                   {Object.entries(baselineResults).map(([k, r]) => (
                     <div key={k} style={{ background: C.panel, border: `1px solid ${BASELINES[k].color}30`, borderRadius: 10, padding: 16 }}>
                       <div style={{ fontSize: 9, color: BASELINES[k].color, letterSpacing: 3, marginBottom: 10 }}>{BASELINES[k].label.toUpperCase()}</div>
-                      {[["Fill Rate", <FillBadge rate={r.metrics.fillRate} />], ["Stockouts", r.metrics.stockOuts], ["Lost Sales", r.metrics.lostSales.toLocaleString()], ["Write-Offs", r.metrics.totWriteOff.toLocaleString()]].map(([l, v]) => (
+                      {[["Profit", `$${Math.round(r.metrics.profit).toLocaleString()}`], ["Service Level", <FillBadge rate={r.metrics.serviceLevel} />], ["Fill Rate", <FillBadge rate={r.metrics.fillRate} />], ["Stockouts", r.metrics.stockOuts]].map(([l, v]) => (
                         <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 6 }}>
                           <span style={{ color: C.muted }}>{l}</span><span style={{ fontWeight: 600 }}>{v}</span>
                         </div>
