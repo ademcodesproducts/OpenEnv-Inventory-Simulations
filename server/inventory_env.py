@@ -295,4 +295,4 @@ if os.path.isdir(_static_dir):
     async def serve_spa(full_path: str = ""):
         # API routes are handled above; everything else serves the React app
         index = os.path.join(_static_dir, "index.html")
-        return FileResponse(index)
+        return FileResponse(index, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
