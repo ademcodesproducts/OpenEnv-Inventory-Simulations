@@ -27,9 +27,9 @@ from tqdm import tqdm
 import datasets
 import numpy as np
 import torch
-from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
+from unsloth import FastLanguageModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -136,7 +136,7 @@ def parse_rop(completion_text: str) -> float | None:
 
 
 def _generate_completion(
-    model: AutoModelForCausalLM,
+    model: Any,
     tokenizer: AutoTokenizer,
     prompt_str: str,
     device: str,
@@ -166,7 +166,7 @@ def _generate_completion(
 
 
 async def _run_episode_async(
-    model: AutoModelForCausalLM | None,
+    model: Any | None,
     tokenizer: AutoTokenizer,
     base_url: str,
     env_type: int,
@@ -265,7 +265,7 @@ async def _run_episode_async(
 
 
 def collect_rollout_dataset(
-    model: AutoModelForCausalLM | None,
+    model: Any | None,
     tokenizer: AutoTokenizer,
     base_url: str,
     env_type: int,
@@ -420,29 +420,28 @@ def setup_model_and_tokenizer(
     lora_rank: int,
     lora_alpha: int,
     device: str,
-) -> tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """Load base model + tokenizer and wrap with LoRA adapters."""
-    print(f"Loading tokenizer from {base_model}...")
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
+) -> tuple[Any, AutoTokenizer]:
+    """Load base model + tokenizer via Unsloth and wrap with LoRA adapters."""
+    print(f"Loading model and tokenizer from {base_model} via Unsloth (bfloat16)...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=base_model,
+        max_seq_length=2048,
+        load_in_4bit=False,
+        fast_inference=True,
+    )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    print(f"Loading model from {base_model} (bfloat16)...")
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        dtype=torch.bfloat16,
-        device_map=device,
-    )
-
-    lora_config = LoraConfig(
+    model = FastLanguageModel.get_peft_model(
+        model,
         r=lora_rank,
         lora_alpha=lora_alpha,
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         lora_dropout=0.05,
         bias="none",
-        task_type=TaskType.CAUSAL_LM,
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
     )
-    model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     device_used = next(model.parameters()).device
     print(f"  Model device: {device_used}  |  GPU memory: {_gpu_mem_str()}", flush=True)
@@ -473,7 +472,7 @@ def train(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    model: AutoModelForCausalLM | None = None
+    model: Any | None = None
     tokenizer: AutoTokenizer | None = None
 
     run_start = time.time()
@@ -489,15 +488,15 @@ def train(
                   f"(found {adapter_marker})", flush=True)
             # Still need to load model for subsequent iterations
             if model is None:
-                print("[Phase 0] Loading adapter from checkpoint...", flush=True)
-                from peft import PeftModel
-                _tok = AutoTokenizer.from_pretrained(iter_output_dir)
+                print("[Phase 0] Loading adapter from checkpoint via Unsloth...", flush=True)
+                model, _tok = FastLanguageModel.from_pretrained(
+                    model_name=iter_output_dir,
+                    max_seq_length=2048,
+                    load_in_4bit=False,
+                    fast_inference=True,
+                )
                 _tok.pad_token = _tok.eos_token
                 _tok.padding_side = "left"
-                _base = AutoModelForCausalLM.from_pretrained(
-                    base_model, dtype=torch.bfloat16, device_map=device
-                )
-                model = PeftModel.from_pretrained(_base, iter_output_dir)
                 tokenizer = _tok
                 print(f"  Loaded adapter from {iter_output_dir}  |  GPU: {_gpu_mem_str()}", flush=True)
             continue
@@ -587,7 +586,7 @@ def train(
 
 
 async def _eval_episode_async(
-    model: AutoModelForCausalLM,
+    model: Any,
     tokenizer: AutoTokenizer,
     base_url: str,
     env_type: int,
@@ -673,21 +672,16 @@ def run_eval(
     env_type: int,
     device: str,
 ) -> None:
-    """Load a saved LoRA adapter and run one evaluation episode."""
-    from peft import PeftModel
-
-    print(f"Loading base model {base_model} for eval...")
-    tokenizer = AutoTokenizer.from_pretrained(adapter_path)
+    """Load a saved LoRA adapter via Unsloth and run one evaluation episode."""
+    print(f"Loading adapter from {adapter_path} via Unsloth...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=adapter_path,
+        max_seq_length=2048,
+        load_in_4bit=False,
+    )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
-
-    base = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        dtype=torch.bfloat16,
-        device_map=device,
-    )
-    model = PeftModel.from_pretrained(base, adapter_path)
-    model.eval()
+    FastLanguageModel.for_inference(model)
     print("Model loaded. Running eval episode...")
     asyncio.run(_eval_episode_async(model, tokenizer, base_url, env_type, device))
 
