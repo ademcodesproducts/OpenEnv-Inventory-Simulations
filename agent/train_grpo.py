@@ -397,12 +397,35 @@ def train(
     run_start = time.time()
 
     for iteration in range(n_iterations):
+        iter_output_dir = os.path.join(output_dir, f"iter_{iteration}")
+        dataset_dir = os.path.join(output_dir, f"dataset_iter_{iteration}")
+        adapter_marker = os.path.join(iter_output_dir, "adapter_config.json")
+
+        # ── Skip completed iterations ──────────────────────────────────────────
+        if os.path.exists(adapter_marker):
+            print(f"\n[SKIP] Iteration {iteration + 1}/{n_iterations} already complete "
+                  f"(found {adapter_marker})", flush=True)
+            # Still need to load model for subsequent iterations
+            if model is None:
+                print("[Phase 0] Loading adapter from checkpoint...", flush=True)
+                from peft import PeftModel
+                _tok = AutoTokenizer.from_pretrained(iter_output_dir)
+                _tok.pad_token = _tok.eos_token
+                _tok.padding_side = "left"
+                _base = AutoModelForCausalLM.from_pretrained(
+                    base_model, dtype=torch.bfloat16, device_map=device
+                )
+                model = PeftModel.from_pretrained(_base, iter_output_dir)
+                tokenizer = _tok
+                print(f"  Loaded adapter from {iter_output_dir}  |  GPU: {_gpu_mem_str()}", flush=True)
+            continue
+
         iter_start = time.time()
         print(f"\n{'='*60}", flush=True)
         print(f"ITERATION {iteration + 1}/{n_iterations}  |  GPU: {_gpu_mem_str()}", flush=True)
         print(f"{'='*60}", flush=True)
 
-        if iteration == 0:
+        if model is None:
             print("\n[Phase 0] Setting up model and tokenizer...", flush=True)
             t0 = time.time()
             model, tokenizer = setup_model_and_tokenizer(
@@ -410,16 +433,23 @@ def train(
             )
             print(f"  Done in {_fmt_duration(time.time() - t0)}", flush=True)
 
-        print(f"\n[Phase 1] Collecting rollout dataset ({episodes_per_iter} episodes)...", flush=True)
-        t0 = time.time()
-        dataset = collect_rollout_dataset(
-            model, tokenizer, base_url, env_type, episodes_per_iter, device
-        )
-        print(f"  Dataset: {len(dataset)} steps in {_fmt_duration(time.time() - t0)}  |  GPU: {_gpu_mem_str()}", flush=True)
+        # ── Phase 1: collect or reload saved dataset ───────────────────────────
+        if os.path.exists(dataset_dir):
+            print(f"\n[Phase 1] Loading saved rollout dataset from {dataset_dir}...", flush=True)
+            dataset = datasets.load_from_disk(dataset_dir)
+            print(f"  Loaded {len(dataset)} steps  |  GPU: {_gpu_mem_str()}", flush=True)
+        else:
+            print(f"\n[Phase 1] Collecting rollout dataset ({episodes_per_iter} episodes)...", flush=True)
+            t0 = time.time()
+            dataset = collect_rollout_dataset(
+                model, tokenizer, base_url, env_type, episodes_per_iter, device
+            )
+            print(f"  Dataset: {len(dataset)} steps in {_fmt_duration(time.time() - t0)}  |  GPU: {_gpu_mem_str()}", flush=True)
+            print(f"  Saving dataset to {dataset_dir}...", flush=True)
+            dataset.save_to_disk(dataset_dir)
 
         reward_fn = build_reward_fn(tokenizer)
 
-        iter_output_dir = os.path.join(output_dir, f"iter_{iteration}")
         os.makedirs(iter_output_dir, exist_ok=True)
 
         print(f"\n[Phase 2] Training (output: {iter_output_dir})...", flush=True)
@@ -430,12 +460,11 @@ def train(
             per_device_train_batch_size=per_device_batch_size,
             gradient_accumulation_steps=grad_accum,
             num_generations=num_generations,
-            max_new_tokens=max_new_tokens,
-            temperature=0.9,
+            max_completion_length=max_new_tokens,
             learning_rate=learning_rate,
             bf16=True,
             logging_steps=5,
-            save_steps=0,
+            save_strategy="no",
             report_to="none",
         )
 
