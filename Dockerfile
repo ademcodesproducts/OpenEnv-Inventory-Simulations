@@ -2,15 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y build-essential && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y build-essential git && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config.py demand_calculator.py demand_environment.py \
      inventory_manager.py order_processor.py performance_tracker.py \
-     agent_environment.py montecarlo_simulator.py ./
+     agent_environment.py montecarlo_simulator.py main.py ./
 COPY server/ ./server/
+COPY agent/ ./agent/
+COPY client/ ./client/
+COPY scripts/ ./scripts/
 
 RUN useradd -m user
 USER user
