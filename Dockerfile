@@ -16,7 +16,7 @@ COPY client/ ./client/
 
 RUN useradd -m user
 USER user
-ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH
+ENV HOME=/home/user PATH=/home/user/.local/bin:$PATH GRADIO_SERVER_NAME=0.0.0.0
 
 EXPOSE 7860
 
