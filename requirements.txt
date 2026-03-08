@@ -98,6 +98,7 @@ rpds-py==0.30.0
 safehttpx==0.1.7
 scipy==1.17.1
 unsloth
+unsloth_zoo
 torch
 transformers>=4.45.0
 trl>=0.12.0
