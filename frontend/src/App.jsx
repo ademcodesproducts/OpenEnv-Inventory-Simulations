@@ -161,12 +161,12 @@ function runOneSimulation(computeROP, demandSeries, envKey) {
     }
     totDemand += demand;
     totFulfilled += fulfilled;
-    const revenue = fulfilled * CFG.SELLING_PRICE;
+    const grossMargin = fulfilled * (CFG.SELLING_PRICE - CFG.UNIT_COST);
     const holdingCost = inventory * CFG.UNIT_COST * CFG.HOLDING_RATE;
     const stockoutPenalty = lost * (CFG.SELLING_PRICE - CFG.UNIT_COST);
-    const orderCost = (ordered > 0 ? CFG.FIXED_ORDER_COST : 0) + ordered * CFG.UNIT_COST;
+    const orderCost = ordered > 0 ? CFG.FIXED_ORDER_COST : 0;
     const writeoffCost = wo * CFG.UNIT_COST;
-    totProfit += revenue - holdingCost - stockoutPenalty - orderCost - writeoffCost;
+    totProfit += grossMargin - holdingCost - stockoutPenalty - orderCost - writeoffCost;
     const fillRateCum = totDemand > 0 ? totFulfilled / totDemand : 0;
     timeline.push({ day, demand, inventory: preInv, inventoryAfter: inventory, fulfilled, lost, rop: Math.round(rop), ordered, wo, delivered, fillRateCum });
   }
@@ -275,12 +275,12 @@ async function runAgentLoop({ envKey, modelId, hfToken, onDay, onDecision, onSta
     }
     totDemand += demand;
     totFulfilled += fulfilled;
-    const revenue = fulfilled * CFG.SELLING_PRICE;
+    const grossMargin = fulfilled * (CFG.SELLING_PRICE - CFG.UNIT_COST);
     const holdingCost = inventory * CFG.UNIT_COST * CFG.HOLDING_RATE;
     const stockoutPenalty = lost * (CFG.SELLING_PRICE - CFG.UNIT_COST);
-    const orderCost = (ordered > 0 ? CFG.FIXED_ORDER_COST : 0) + ordered * CFG.UNIT_COST;
+    const orderCost = ordered > 0 ? CFG.FIXED_ORDER_COST : 0;
     const writeoffCost = wo * CFG.UNIT_COST;
-    totProfit += revenue - holdingCost - stockoutPenalty - orderCost - writeoffCost;
+    totProfit += grossMargin - holdingCost - stockoutPenalty - orderCost - writeoffCost;
     const fillRateCum = totDemand > 0 ? totFulfilled / totDemand : 0;
     const entry = { day, demand, inventory: preInv, inventoryAfter: inventory, fulfilled, lost, rop: Math.round(currentROP), ordered, wo, delivered, fillRateCum };
     timeline.push(entry);
